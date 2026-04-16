@@ -1,0 +1,3 @@
+WebFrontEnd/node_modules/
+BackEnd/**/__pycache__/
+*.pyc
