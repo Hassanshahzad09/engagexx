@@ -1,16 +1,19 @@
+import { useEffect, useState } from 'react';
 import { Users, DollarSign, AlertTriangle, TrendingUp, CheckCircle, XCircle, Eye, Ban, LogOut, Zap } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts';
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 export default function AdminDashboard({ onNavigate, onLogout }) {
+  const [pendingTasks, setPendingTasks] = useState([]);
+
   const stats = [
     { label: 'Total Users', value: '12,458', change: '+12.5%', icon: Users, color: 'text-blue-600', bg: 'bg-blue-100' },
     { label: 'Revenue', value: '$45,892', change: '+8.2%', icon: DollarSign, color: 'text-green-600', bg: 'bg-green-100' },
     { label: 'Active Tasks', value: '1,284', change: '+15.3%', icon: TrendingUp, color: 'text-purple-600', bg: 'bg-purple-100' },
-    { label: 'Flagged Tasks', value: '23', change: '-5.4%', icon: AlertTriangle, color: 'text-orange-600', bg: 'bg-orange-100' },
+    { label: 'Pending Tasks', value: pendingTasks.length, change: 'Needs review', icon: AlertTriangle, color: 'text-orange-600', bg: 'bg-orange-100' },
   ];
 
   const revenueData = [
@@ -30,49 +33,6 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
     { name: 'Twitter', value: 164 },
   ];
 
-  const flaggedTasks = [
-    {
-      id: 1,
-      user: 'john_doe',
-      task: 'Instagram Followers',
-      reason: 'Suspicious activity pattern',
-      platform: 'Instagram',
-      amount: '$45.00',
-      timestamp: '10 min ago',
-      severity: 'high',
-    },
-    {
-      id: 2,
-      user: 'sarah_smith',
-      task: 'YouTube Views',
-      reason: 'Multiple reports from users',
-      platform: 'YouTube',
-      amount: '$28.50',
-      timestamp: '25 min ago',
-      severity: 'medium',
-    },
-    {
-      id: 3,
-      user: 'mike_jones',
-      task: 'Facebook Likes',
-      reason: 'Rapid task completion',
-      platform: 'Facebook',
-      amount: '$15.00',
-      timestamp: '1 hour ago',
-      severity: 'low',
-    },
-    {
-      id: 4,
-      user: 'emma_wilson',
-      task: 'Twitter Retweets',
-      reason: 'Bot-like behavior detected',
-      platform: 'Twitter',
-      amount: '$32.00',
-      timestamp: '2 hours ago',
-      severity: 'high',
-    },
-  ];
-
   const recentUsers = [
     { id: 1, name: 'Alice Johnson', email: 'alice@example.com', type: 'Buyer', status: 'Active', joined: '2 days ago' },
     { id: 2, name: 'Bob Williams', email: 'bob@example.com', type: 'Seller', status: 'Active', joined: '3 days ago' },
@@ -80,14 +40,67 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
     { id: 4, name: 'David Lee', email: 'david@example.com', type: 'Seller', status: 'Active', joined: '1 week ago' },
   ];
 
-  const getSeverityBadge = (severity) => {
-    if (severity === 'high') {
-      return <Badge className="bg-red-100 text-red-700 hover:bg-red-100">High</Badge>;
+  const fetchPendingTasks = async () => {
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/admin-pending-tasks/');
+      const data = await response.json();
+      if (response.ok) {
+        setPendingTasks(data.tasks || []);
+      }
+    } catch (error) {
+      console.error('Pending tasks fetch error:', error);
     }
-    if (severity === 'medium') {
-      return <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100">Medium</Badge>;
+  };
+
+  const handleApprove = async (taskId) => {
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/api/approve-task/${taskId}/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const data = await response.json();
+
+      if (response.ok) {
+        alert(data.message);
+        fetchPendingTasks();
+      } else {
+        alert(data.error || 'Approve failed');
+      }
+    } catch (error) {
+      console.error(error);
+      alert('Server error');
     }
-    return <Badge className="bg-yellow-100 text-yellow-700 hover:bg-yellow-100">Low</Badge>;
+  };
+
+  const handleReject = async (taskId) => {
+    const reason = prompt('Enter rejection reason') || '';
+
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/api/reject-task/${taskId}/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason }),
+      });
+      const data = await response.json();
+
+      if (response.ok) {
+        alert(data.message);
+        fetchPendingTasks();
+      } else {
+        alert(data.error || 'Reject failed');
+      }
+    } catch (error) {
+      console.error(error);
+      alert('Server error');
+    }
+  };
+
+  useEffect(() => {
+    fetchPendingTasks();
+  }, []);
+
+  const getSeverityBadge = () => {
+    return <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100">Pending</Badge>;
   };
 
   const getUserTypeBadge = (type) => {
@@ -106,7 +119,6 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
@@ -128,13 +140,11 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 sm:py-8">
-        {/* Welcome Section */}
         <div className="mb-6 sm:mb-8">
           <h1 className="text-gray-900 mb-2">Admin Dashboard</h1>
           <p className="text-gray-600 text-sm sm:text-base">Monitor platform activity and manage users and tasks.</p>
         </div>
 
-        {/* Stats Grid */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-6 sm:mb-8">
           {stats.map((stat, index) => (
             <Card key={index} className="border-gray-200 rounded-2xl hover:shadow-lg transition-shadow">
@@ -148,18 +158,11 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
                     <stat.icon className={`w-5 h-5 sm:w-6 sm:h-6 ${stat.color}`} />
                   </div>
                 </div>
-                <div className="flex items-center gap-1">
-                  <span className={`text-xs sm:text-sm ${stat.change.startsWith('+') ? 'text-green-600' : 'text-red-600'}`}>
-                    {stat.change}
-                  </span>
-                  <span className="text-xs sm:text-sm text-gray-500">vs last month</span>
-                </div>
               </CardContent>
             </Card>
           ))}
         </div>
 
-        {/* Analytics Charts */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-8 mb-6 sm:mb-8">
           <Card className="border-gray-200 rounded-2xl">
             <CardHeader className="p-4 sm:p-6">
@@ -178,16 +181,8 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                   <XAxis dataKey="name" stroke="#6b7280" style={{ fontSize: '12px' }} />
                   <YAxis stroke="#6b7280" style={{ fontSize: '12px' }} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '12px' }}
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="revenue"
-                    stroke="#10b981"
-                    fillOpacity={1}
-                    fill="url(#colorRevenue)"
-                  />
+                  <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '12px' }} />
+                  <Area type="monotone" dataKey="revenue" stroke="#10b981" fillOpacity={1} fill="url(#colorRevenue)" />
                 </AreaChart>
               </ResponsiveContainer>
             </CardContent>
@@ -204,9 +199,7 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
                   <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
                   <XAxis dataKey="name" stroke="#6b7280" style={{ fontSize: '12px' }} />
                   <YAxis stroke="#6b7280" style={{ fontSize: '12px' }} />
-                  <Tooltip
-                    contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '12px' }}
-                  />
+                  <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', fontSize: '12px' }} />
                   <Bar dataKey="value" fill="#10b981" radius={[8, 8, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -214,52 +207,50 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
           </Card>
         </div>
 
-        {/* Main Content */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-8">
-          {/* Flagged Tasks */}
           <div className="lg:col-span-2">
             <Card className="border-gray-200 rounded-2xl">
               <CardHeader className="p-4 sm:p-6">
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                   <div>
-                    <CardTitle className="text-gray-900 text-base sm:text-lg">Flagged Tasks</CardTitle>
-                    <CardDescription className="text-xs sm:text-sm">Review and moderate suspicious activities</CardDescription>
+                    <CardTitle className="text-gray-900 text-base sm:text-lg">Pending Tasks</CardTitle>
+                    <CardDescription className="text-xs sm:text-sm">Review buyer tasks before they go live on the portal</CardDescription>
                   </div>
-                  <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 w-fit text-xs sm:text-sm">{flaggedTasks.length} Pending</Badge>
+                  <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 w-fit text-xs sm:text-sm">{pendingTasks.length} Pending</Badge>
                 </div>
               </CardHeader>
               <CardContent className="p-4 sm:p-6 pt-0">
                 <div className="space-y-3 sm:space-y-4">
-                  {flaggedTasks.map((task) => (
+                  {pendingTasks.map((task) => (
                     <div key={task.id} className="border border-gray-200 rounded-xl p-3 sm:p-4 hover:border-orange-200 transition-colors">
                       <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between mb-3 gap-2">
                         <div className="flex-1">
                           <div className="flex items-center gap-2 mb-1 flex-wrap">
-                            <h3 className="text-gray-900 text-sm sm:text-base">{task.task}</h3>
-                            {getSeverityBadge(task.severity)}
+                            <h3 className="text-gray-900 text-sm sm:text-base">{task.title}</h3>
+                            {getSeverityBadge()}
                           </div>
-                          <p className="text-xs sm:text-sm text-gray-600">User: {task.user}</p>
-                          <p className="text-xs sm:text-sm text-gray-500 mt-1">{task.reason}</p>
+                          <p className="text-xs sm:text-sm text-gray-600">Buyer: {task.buyerName}</p>
+                          <p className="text-xs sm:text-sm text-gray-500 mt-1">{task.taskType} - Goal: {task.goal}</p>
                         </div>
-                        <span className="text-xs sm:text-sm text-gray-500 whitespace-nowrap">{task.timestamp}</span>
+                        <span className="text-xs sm:text-sm text-gray-500 whitespace-nowrap">{task.created}</span>
                       </div>
                       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 pt-3 border-t border-gray-100">
                         <div className="flex items-center gap-2 sm:gap-3 flex-wrap">
                           <span className="text-xs sm:text-sm text-gray-600">Platform:</span>
                           <Badge variant="outline" className="text-xs">{task.platform}</Badge>
-                          <span className="text-xs sm:text-sm text-gray-600">Amount:</span>
-                          <span className="text-gray-900 text-xs sm:text-sm">{task.amount}</span>
+                          <span className="text-xs sm:text-sm text-gray-600">Price:</span>
+                          <span className="text-gray-900 text-xs sm:text-sm">${task.pricePerAction}</span>
                         </div>
                         <div className="flex items-center gap-2 flex-wrap">
                           <Button size="sm" variant="outline" className="rounded-full text-xs h-8">
                             <Eye className="w-3 h-3 sm:w-4 sm:h-4 sm:mr-2" />
                             <span className="hidden sm:inline">Review</span>
                           </Button>
-                          <Button size="sm" className="bg-green-600 hover:bg-green-700 text-white rounded-full text-xs h-8">
+                          <Button size="sm" className="bg-green-600 hover:bg-green-700 text-white rounded-full text-xs h-8" onClick={() => handleApprove(task.id)}>
                             <CheckCircle className="w-3 h-3 sm:w-4 sm:h-4 sm:mr-2" />
                             <span className="hidden sm:inline">Approve</span>
                           </Button>
-                          <Button size="sm" variant="destructive" className="rounded-full text-xs h-8">
+                          <Button size="sm" variant="destructive" className="rounded-full text-xs h-8" onClick={() => handleReject(task.id)}>
                             <XCircle className="w-3 h-3 sm:w-4 sm:h-4 sm:mr-2" />
                             <span className="hidden sm:inline">Reject</span>
                           </Button>
@@ -272,7 +263,6 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
             </Card>
           </div>
 
-          {/* User Management */}
           <div className="space-y-4 sm:space-y-6">
             <Card className="border-gray-200 rounded-2xl">
               <CardHeader className="p-4 sm:p-6">
@@ -314,35 +304,6 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
                     </div>
                   </TabsContent>
                 </Tabs>
-              </CardContent>
-            </Card>
-
-            <Card className="border-gray-200 rounded-2xl">
-              <CardHeader className="p-4 sm:p-6">
-                <CardTitle className="text-gray-900 text-base sm:text-lg">Platform Stats</CardTitle>
-                <CardDescription className="text-xs sm:text-sm">Real-time metrics</CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-3 sm:space-y-4 p-4 sm:p-6 pt-0">
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <span className="text-xs sm:text-sm text-gray-600">Active Sessions</span>
-                  <span className="text-gray-900 text-xs sm:text-sm">3,284</span>
-                </div>
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <span className="text-xs sm:text-sm text-gray-600">Avg. Task Time</span>
-                  <span className="text-gray-900 text-xs sm:text-sm">4.2 min</span>
-                </div>
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <span className="text-xs sm:text-sm text-gray-600">Success Rate</span>
-                  <span className="text-green-600 text-xs sm:text-sm">96.8%</span>
-                </div>
-                <div className="flex items-center justify-between pb-3 border-b border-gray-100">
-                  <span className="text-xs sm:text-sm text-gray-600">Platform Fee</span>
-                  <span className="text-gray-900 text-xs sm:text-sm">$2,450</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-xs sm:text-sm text-gray-600">Disputes</span>
-                  <span className="text-orange-600 text-xs sm:text-sm">12</span>
-                </div>
               </CardContent>
             </Card>
           </div>

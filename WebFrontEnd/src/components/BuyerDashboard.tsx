@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, Wallet, TrendingUp, Clock, CheckCircle, Facebook, Instagram, Youtube, Twitter, BarChart3, Filter, LogOut, Zap, AlertCircle } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -11,72 +11,76 @@ import { Badge } from './ui/badge';
 import { Progress } from './ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { useLocation } from 'react-router-dom';
+
 export default function BuyerDashboard({ onNavigate, onLogout }) {
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
+  const [taskForm, setTaskForm] = useState({
+    title: '',
+    platform: '',
+    taskType: '',
+    url: '',
+    goal: '',
+    pricePerAction: '',
+  });
+  const [dashboardStats, setDashboardStats] = useState({
+    activeTasks: 0,
+    completedTasks: 0,
+    allTasks: 0,
+    totalEngagement: 0,
+    performance: 0,
+    tasks: [],
+  });
+
+  const location = useLocation();
+  const user = location.state?.userData;
+  const loggedInUserName = user?.userName || 'Buyer';
+
+  useEffect(() => {
+    if (!user?.userId) return;
+
+    const fetchDashboardStats = async () => {
+      try {
+        const response = await fetch(`http://127.0.0.1:8000/api/buyer-dashboard-stats/${user.userId}/`);
+        const data = await response.json();
+
+        if (response.ok) {
+          setDashboardStats({
+            activeTasks: data.activeTasks || 0,
+            completedTasks: data.completedTasks || 0,
+            allTasks: data.allTasks || 0,
+            totalEngagement: data.totalEngagement || 0,
+            performance: data.performance || 0,
+            tasks: data.tasks || [],
+          });
+        }
+      } catch (error) {
+        console.error('Dashboard stats error:', error);
+      }
+    };
+
+    fetchDashboardStats();
+  }, [user]);
 
   const stats = [
-    { label: 'Wallet Balance', value: '$2,450.00', icon: Wallet, color: 'text-green-600', bg: 'bg-green-100' },
-    { label: 'Active Tasks', value: '12', icon: Clock, color: 'text-blue-600', bg: 'bg-blue-100' },
-    { label: 'Completed Tasks', value: '48', icon: CheckCircle, color: 'text-purple-600', bg: 'bg-purple-100' },
-    { label: 'Total Engagement', value: '15.2K', icon: TrendingUp, color: 'text-orange-600', bg: 'bg-orange-100' },
-  ];
-
-  const tasks = [
-    {
-      id: 1,
-      title: 'Instagram Post Likes',
-      platform: 'Instagram',
-      type: 'Likes',
-      target: 500,
-      completed: 342,
-      price: 0.05,
-      status: 'active',
-      created: '2 hours ago',
-    },
-    {
-      id: 2,
-      title: 'YouTube Video Views',
-      platform: 'YouTube',
-      type: 'Views',
-      target: 1000,
-      completed: 856,
-      price: 0.08,
-      status: 'active',
-      created: '5 hours ago',
-    },
-    {
-      id: 3,
-      title: 'Facebook Page Likes',
-      platform: 'Facebook',
-      type: 'Likes',
-      target: 200,
-      completed: 200,
-      price: 0.06,
-      status: 'completed',
-      created: '1 day ago',
-    },
-    {
-      id: 4,
-      title: 'Twitter Followers',
-      platform: 'Twitter',
-      type: 'Follows',
-      target: 300,
-      completed: 145,
-      price: 0.10,
-      status: 'active',
-      created: '3 hours ago',
-    },
+    { label: 'Wallet Balance', value: '$0.00', icon: Wallet, color: 'text-green-600', bg: 'bg-green-100' },
+    { label: 'Active Tasks', value: dashboardStats.activeTasks, icon: Clock, color: 'text-blue-600', bg: 'bg-blue-100' },
+    { label: 'Completed Tasks', value: dashboardStats.completedTasks, icon: CheckCircle, color: 'text-purple-600', bg: 'bg-purple-100' },
+    { label: 'Platform Usage', value: dashboardStats.totalEngagement, icon: TrendingUp, color: 'text-orange-600', bg: 'bg-orange-100' },
   ];
 
   const getPlatformIcon = (platform) => {
     switch (platform) {
       case 'Instagram':
+      case 'instagram':
         return <Instagram className="w-5 h-5 text-pink-600" />;
       case 'YouTube':
+      case 'youtube':
         return <Youtube className="w-5 h-5 text-red-600" />;
       case 'Facebook':
+      case 'facebook':
         return <Facebook className="w-5 h-5 text-blue-600" />;
       case 'Twitter':
+      case 'twitter':
         return <Twitter className="w-5 h-5 text-sky-600" />;
       default:
         return null;
@@ -84,19 +88,48 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
   };
 
   const getStatusBadge = (status) => {
-    if (status === 'active') {
+    if (status === 'active' || status === 'in_progress') {
       return <Badge className="bg-blue-100 text-blue-700 hover:bg-blue-100">Active</Badge>;
+    }
+    if (status === 'pending') {
+      return <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100">Pending</Badge>;
     }
     return <Badge className="bg-green-100 text-green-700 hover:bg-green-100">Completed</Badge>;
   };
 
-  const location = useLocation()
-  const user = location.state?.userData;
-  console.log("user data : ",user)
+  const handleCreateTask = async () => {
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/create-task/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.userId,
+          title: taskForm.title,
+          platform: taskForm.platform,
+          taskType: taskForm.taskType,
+          url: taskForm.url,
+          goal: taskForm.goal,
+          pricePerAction: taskForm.pricePerAction,
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        alert(data.message);
+        setIsCreateTaskOpen(false);
+        window.location.reload();
+      } else {
+        alert(data.error || 'Task creation failed');
+      }
+    } catch (error) {
+      console.error(error);
+      alert('Server error');
+    }
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header */}
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
@@ -121,13 +154,11 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
       </header>
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Welcome Section */}
         <div className="mb-8">
-          <h1 className="text-gray-900 mb-2">Welcome back, John!</h1>
+          <h1 className="text-gray-900 mb-2">Welcome back, {loggedInUserName}!</h1>
           <p className="text-gray-600">Manage your social media engagement tasks and track performance.</p>
         </div>
 
-        {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           {stats.map((stat, index) => (
             <Card key={index} className="border-gray-200 rounded-2xl hover:shadow-lg transition-shadow">
@@ -146,9 +177,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
           ))}
         </div>
 
-        {/* Main Content */}
         <div className="grid lg:grid-cols-3 gap-8">
-          {/* Tasks List */}
           <div className="lg:col-span-2">
             <Card className="border-gray-200 rounded-2xl">
               <CardHeader>
@@ -170,10 +199,14 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                         <DialogDescription>Fill in the details to create a new engagement task</DialogDescription>
                       </DialogHeader>
                       <div className="space-y-4 pt-4">
+                        <div>
+                          <Label htmlFor="title">Task Title</Label>
+                          <Input id="title" placeholder="Instagram Post Likes" value={taskForm.title} onChange={(e) => setTaskForm({ ...taskForm, title: e.target.value })} />
+                        </div>
                         <div className="grid grid-cols-2 gap-4">
                           <div>
                             <Label htmlFor="platform">Platform</Label>
-                            <Select>
+                            <Select onValueChange={(value) => setTaskForm({ ...taskForm, platform: value })}>
                               <SelectTrigger id="platform">
                                 <SelectValue placeholder="Select platform" />
                               </SelectTrigger>
@@ -187,7 +220,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                           </div>
                           <div>
                             <Label htmlFor="task-type">Task Type</Label>
-                            <Select>
+                            <Select onValueChange={(value) => setTaskForm({ ...taskForm, taskType: value })}>
                               <SelectTrigger id="task-type">
                                 <SelectValue placeholder="Select type" />
                               </SelectTrigger>
@@ -203,16 +236,16 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                         </div>
                         <div>
                           <Label htmlFor="url">Post/Profile URL</Label>
-                          <Input id="url" placeholder="https://..." />
+                          <Input id="url" placeholder="https://..." value={taskForm.url} onChange={(e) => setTaskForm({ ...taskForm, url: e.target.value })} />
                         </div>
                         <div className="grid grid-cols-2 gap-4">
                           <div>
                             <Label htmlFor="target">Target Count</Label>
-                            <Input id="target" type="number" placeholder="500" />
+                            <Input id="target" type="number" placeholder="500" value={taskForm.goal} onChange={(e) => setTaskForm({ ...taskForm, goal: e.target.value })} />
                           </div>
                           <div>
                             <Label htmlFor="price">Price per Action ($)</Label>
-                            <Input id="price" type="number" step="0.01" placeholder="0.05" />
+                            <Input id="price" type="number" step="0.01" placeholder="0.05" value={taskForm.pricePerAction} onChange={(e) => setTaskForm({ ...taskForm, pricePerAction: e.target.value })} />
                           </div>
                         </div>
                         <div>
@@ -224,15 +257,12 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                             <AlertCircle className="w-5 h-5 text-green-600 mt-0.5" />
                             <div>
                               <p className="text-sm text-green-900 mb-1">Estimated Cost</p>
-                              <p className="text-green-700">$25.00 (500 actions × $0.05)</p>
+                              <p className="text-green-700">$25.00 (500 actions x $0.05)</p>
                             </div>
                           </div>
                         </div>
                         <div className="flex gap-3 pt-4">
-                          <Button
-                            className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full"
-                            onClick={() => setIsCreateTaskOpen(false)}
-                          >
+                          <Button className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full" onClick={handleCreateTask}>
                             Create Task
                           </Button>
                           <Button variant="outline" className="flex-1 rounded-full" onClick={() => setIsCreateTaskOpen(false)}>
@@ -252,7 +282,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                     <TabsTrigger value="all" className="flex-1">All Tasks</TabsTrigger>
                   </TabsList>
                   <TabsContent value="active" className="space-y-4">
-                    {tasks.filter(task => task.status === 'active').map((task) => (
+                    {dashboardStats.tasks.filter((task) => task.status === 'active' || task.status === 'in_progress').map((task) => (
                       <div key={task.id} className="border border-gray-200 rounded-xl p-4 hover:border-green-200 transition-colors">
                         <div className="flex items-start justify-between mb-3">
                           <div className="flex items-center gap-3">
@@ -267,25 +297,19 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                         <div className="space-y-2 mb-4">
                           <div className="flex items-center justify-between text-sm">
                             <span className="text-gray-600">Progress</span>
-                            <span className="text-gray-900">
-                              {task.completed} / {task.target}
-                            </span>
+                            <span className="text-gray-900">{task.completed} / {task.target}</span>
                           </div>
-                          <Progress value={(task.completed / task.target) * 100} className="h-2" />
+                          <Progress value={task.target ? (task.completed / task.target) * 100 : 0} className="h-2" />
                         </div>
                         <div className="flex items-center justify-between">
-                          <div className="text-sm text-gray-600">
-                            Price: <span className="text-green-600">${task.price}</span> per {task.type.toLowerCase()}
-                          </div>
-                          <Button variant="outline" size="sm" className="rounded-full">
-                            View Details
-                          </Button>
+                          <div className="text-sm text-gray-600">Price: <span className="text-green-600">${task.price}</span> per {String(task.type).toLowerCase()}</div>
+                          <Button variant="outline" size="sm" className="rounded-full">View Details</Button>
                         </div>
                       </div>
                     ))}
                   </TabsContent>
                   <TabsContent value="completed" className="space-y-4">
-                    {tasks.filter(task => task.status === 'completed').map((task) => (
+                    {dashboardStats.tasks.filter((task) => task.status === 'completed').map((task) => (
                       <div key={task.id} className="border border-gray-200 rounded-xl p-4">
                         <div className="flex items-start justify-between mb-3">
                           <div className="flex items-center gap-3">
@@ -298,18 +322,14 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                           {getStatusBadge(task.status)}
                         </div>
                         <div className="flex items-center justify-between">
-                          <div className="text-sm text-gray-600">
-                            Total: <span className="text-gray-900">${(task.target * task.price).toFixed(2)}</span>
-                          </div>
-                          <Button variant="outline" size="sm" className="rounded-full">
-                            View Report
-                          </Button>
+                          <div className="text-sm text-gray-600">Total: <span className="text-gray-900">${(task.target * task.price).toFixed(2)}</span></div>
+                          <Button variant="outline" size="sm" className="rounded-full">View Report</Button>
                         </div>
                       </div>
                     ))}
                   </TabsContent>
                   <TabsContent value="all" className="space-y-4">
-                    {tasks.map((task) => (
+                    {dashboardStats.tasks.map((task) => (
                       <div key={task.id} className="border border-gray-200 rounded-xl p-4 hover:border-green-200 transition-colors">
                         <div className="flex items-start justify-between mb-3">
                           <div className="flex items-center gap-3">
@@ -321,27 +341,25 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                           </div>
                           {getStatusBadge(task.status)}
                         </div>
-                        {task.status === 'active' && (
+                        {(task.status === 'active' || task.status === 'in_progress') && (
                           <div className="space-y-2 mb-4">
                             <div className="flex items-center justify-between text-sm">
                               <span className="text-gray-600">Progress</span>
-                              <span className="text-gray-900">
-                                {task.completed} / {task.target}
-                              </span>
+                              <span className="text-gray-900">{task.completed} / {task.target}</span>
                             </div>
-                            <Progress value={(task.completed / task.target) * 100} className="h-2" />
+                            <Progress value={task.target ? (task.completed / task.target) * 100 : 0} className="h-2" />
                           </div>
                         )}
                         <div className="flex items-center justify-between">
                           <div className="text-sm text-gray-600">
-                            {task.status === 'active' ? (
-                              <>Price: <span className="text-green-600">${task.price}</span> per {task.type.toLowerCase()}</>
+                            {(task.status === 'active' || task.status === 'in_progress') ? (
+                              <>Price: <span className="text-green-600">${task.price}</span> per {String(task.type).toLowerCase()}</>
                             ) : (
                               <>Total: <span className="text-gray-900">${(task.target * task.price).toFixed(2)}</span></>
                             )}
                           </div>
                           <Button variant="outline" size="sm" className="rounded-full">
-                            {task.status === 'active' ? 'View Details' : 'View Report'}
+                            {(task.status === 'active' || task.status === 'in_progress') ? 'View Details' : 'View Report'}
                           </Button>
                         </div>
                       </div>
@@ -352,9 +370,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
             </Card>
           </div>
 
-          {/* Sidebar */}
           <div className="space-y-6">
-            {/* Quick Actions */}
             <Card className="border-gray-200 rounded-2xl">
               <CardHeader>
                 <CardTitle className="text-gray-900">Quick Actions</CardTitle>
@@ -375,7 +391,6 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
               </CardContent>
             </Card>
 
-            {/* Performance Overview */}
             <Card className="border-gray-200 rounded-2xl">
               <CardHeader>
                 <CardTitle className="text-gray-900">Performance</CardTitle>
@@ -384,72 +399,23 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
               <CardContent className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Task Success Rate</span>
-                  <span className="text-green-600">94%</span>
+                  <span className="text-green-600">{dashboardStats.performance}%</span>
                 </div>
-                <Progress value={94} className="h-2" />
-                
+                <Progress value={dashboardStats.performance} className="h-2" />
+
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Avg. Completion Time</span>
                   <span className="text-gray-900">2.5 days</span>
                 </div>
-                
+
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Total Spent</span>
                   <span className="text-gray-900">$1,284</span>
                 </div>
-                
+
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-gray-600">Active Campaigns</span>
-                  <span className="text-gray-900">12</span>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Platform Distribution */}
-            <Card className="border-gray-200 rounded-2xl">
-              <CardHeader>
-                <CardTitle className="text-gray-900">Platform Usage</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <Instagram className="w-5 h-5 text-pink-600" />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm text-gray-600">Instagram</span>
-                      <span className="text-sm text-gray-900">45%</span>
-                    </div>
-                    <Progress value={45} className="h-1.5" />
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Youtube className="w-5 h-5 text-red-600" />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm text-gray-600">YouTube</span>
-                      <span className="text-sm text-gray-900">30%</span>
-                    </div>
-                    <Progress value={30} className="h-1.5" />
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Facebook className="w-5 h-5 text-blue-600" />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm text-gray-600">Facebook</span>
-                      <span className="text-sm text-gray-900">15%</span>
-                    </div>
-                    <Progress value={15} className="h-1.5" />
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Twitter className="w-5 h-5 text-sky-600" />
-                  <div className="flex-1">
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm text-gray-600">Twitter</span>
-                      <span className="text-sm text-gray-900">10%</span>
-                    </div>
-                    <Progress value={10} className="h-1.5" />
-                  </div>
+                  <span className="text-gray-900">{dashboardStats.activeTasks || 0}</span>
                 </div>
               </CardContent>
             </Card>
