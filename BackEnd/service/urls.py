@@ -11,4 +11,8 @@ urlpatterns = [
     path('approved-tasks/', views.approved_tasks, name="approved-tasks"),
     path('approve-task/<int:task_id>/', views.approve_task, name="approve-task"),
     path('reject-task/<int:task_id>/', views.reject_task, name="reject-task"),
+    path('seller-list/', views.SellerList, name="seller-list"),
+    path('rating-indexes/', views.getRatingIndexes, name="rating-indexes"),
+       path('assign-jobs/', views.assign_jobs_api, name="assign-jobs"),
+
 ]

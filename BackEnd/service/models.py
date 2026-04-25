@@ -23,7 +23,8 @@ class SellerProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     totalEarnings = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     ratings = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(5)])
-
+    avgCompletionTime = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    sucessRate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
 class BuyerTasks(models.Model):
     buyer = models.ForeignKey(BuyerProfile, on_delete=models.CASCADE, related_name="tasks")
@@ -50,3 +51,24 @@ class BuyerTasks(models.Model):
 
     def __str__(self):
         return f"{self.title} - {self.platform}"
+
+
+class JobsHistory(models.Model):
+    seller = models.ForeignKey(SellerProfile, on_delete=models.CASCADE, related_name="jobs")
+    task = models.ForeignKey(BuyerTasks, on_delete=models.CASCADE, related_name="jobs")
+    progress = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    priceEarned = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    status = models.CharField(max_length=20, default="pending")
+    startDate = models.DateTimeField(auto_now_add=True)
+    endDate = models.DateTimeField(null=True, blank=True)
+    completionTime = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    taskId = models.IntegerField(default=0)
+# current indexes of each rating seller
+
+class RatingIndexes(models.Model):
+    rate1 = models.IntegerField(default=-1)
+    rate2 = models.IntegerField(default=-1)
+    rate3 = models.IntegerField(default=-1)
+    rate4 = models.IntegerField(default=-1)
+    rate5 = models.IntegerField(default=-1)
+

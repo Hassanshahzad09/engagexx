@@ -16,7 +16,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
   const [taskForm, setTaskForm] = useState({
     title: '',
-    platform: '',
+    platform: '', 
     taskType: '',
     url: '',
     goal: '',

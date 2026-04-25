@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'service',
     'corsheaders',
+    'mlservice'
 ]
 
 MIDDLEWARE = [
@@ -69,7 +70,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.mysql',
         'NAME': 'engageX',
         'USER': 'root',
-        'PASSWORD': 'Affaqahmad12345#',
+        'PASSWORD': 'horserider12',
         'HOST': '127.0.0.1',
         'PORT': '3306',
     }

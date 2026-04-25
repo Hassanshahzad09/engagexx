@@ -8,6 +8,7 @@ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, R
 
 export default function AdminDashboard({ onNavigate, onLogout }) {
   const [pendingTasks, setPendingTasks] = useState([]);
+  //Line 119 and 60 are the main working lines for job allocation to sellers according to their ratings
 
   const stats = [
     { label: 'Total Users', value: '12,458', change: '+12.5%', icon: Users, color: 'text-blue-600', bg: 'bg-blue-100' },
@@ -40,6 +41,31 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
     { id: 4, name: 'David Lee', email: 'david@example.com', type: 'Seller', status: 'Active', joined: '1 week ago' },
   ];
 
+  /*
+  const findIndexes = (sellerObjArr, ratingLength) => {
+  const indexes = [];
+  for (let i = 1; i <= ratingLength; i++) {
+    indexes.push(
+      sellerObjArr.findIndex(seller => seller.Rating === i)
+    );
+  }
+
+  return indexes;
+};
+const assignJob = async(sellerObj,indexes,taskID)=>{
+  // if indexes len ==1 means only 1 rating seller exists in db , if indexes len == 2 means only 2 rating sellers exists in db and so on
+  try{  
+    const response = await fetch('http://127.0.0.1:8000/api/rating-indexes/')
+    const data = await response.json() 
+    if(response.ok){
+      console.log(data)  
+    }
+  }
+  catch(error){
+    console.error('Rating indexes fetch error:', error);
+  }
+}
+*/
   const fetchPendingTasks = async () => {
     try {
       const response = await fetch('http://127.0.0.1:8000/api/admin-pending-tasks/');
@@ -52,6 +78,43 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
     }
   };
 
+  const fetchSellers = async()=>{
+      try {
+      const response = await fetch('http://127.0.0.1:8000/api/seller-list/');
+      const data = await response.json();
+      if (response.ok) {
+        //console.log(data.sellers)
+        return data.sellers || [];
+      }
+    } catch (error) {
+      console.error('Seller list fetch error:', error);
+    }
+  }
+  const fetchJobs = async(sellersObj)=>{
+    try {
+      const totalJobs = 20
+      const response = await fetch(`http://127.0.0.1:8000/ml/allocate-jobs/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({total_jobs: totalJobs, sellers: sellersObj }),
+      });
+    const data = await response.json();
+    if(response.ok){
+      console.log(data.job_allocation)
+     return data.job_allocation
+      //It has given the response sucessFully
+      //object contains 2 parameters 
+      //1) Status
+      //2) job_allocation an object contains jobs for each ratings from 1 to 5
+      //Now we will update the jobs in the database according to the job allocation received from the ML model
+
+    }
+    } catch (error) {
+      console.error('Job assignment error:', error);
+    }
+
+  }
+  
   const handleApprove = async (taskId) => {
     try {
       const response = await fetch(`http://127.0.0.1:8000/api/approve-task/${taskId}/`, {
@@ -62,6 +125,34 @@ export default function AdminDashboard({ onNavigate, onLogout }) {
 
       if (response.ok) {
         alert(data.message);
+        let sellersObj = await fetchSellers();
+        const allocation = await fetchJobs(sellersObj);
+        console.log(allocation)
+        const formattedJobs = {
+  rate1: allocation["1"] || 0,
+  rate2: allocation["2"] || 0,
+  rate3: allocation["3"] || 0,
+  rate4: allocation["4"] || 0,
+  rate5: allocation["5"] || 0,
+};
+console.log("formattedJob : ",allocation)
+        await fetch('http://127.0.0.1:8000/api/assign-jobs/', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    sellers: sellersObj,
+    jobs: formattedJobs,
+    taskId: taskId
+  })
+});
+       /* sellersObj.sort((a, b) => a.Rating - b.Rating); // sorting according to rating
+       const doesEachRatingSellerExist =  Object.keys(jobAllocation).length //if len is 5 then rating >=1 && <=5 seller exists
+       const  indexesArr = findIndexes(sellersObj,doesEachRatingSellerExist)
+        const isJobAssigned = assignJob(sellersObj,indexesArr,taskId)*/
+       //Here is the working .....
+       //need to make sure that the next job goes to the next rating seller 
+       
+       
         fetchPendingTasks();
       } else {
         alert(data.error || 'Approve failed');

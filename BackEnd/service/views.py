@@ -4,9 +4,10 @@ from django.contrib.auth.hashers import check_password, make_password
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-
-from .models import BuyerProfile, BuyerTasks, SellerProfile, User
-
+from httpcore import request
+from BackEnd.utils import assign_jobs_round_robin
+from .models import BuyerProfile, BuyerTasks, RatingIndexes, SellerProfile, User,JobsHistory
+from django.db import transaction
 
 @csrf_exempt
 def signup(request):
@@ -287,7 +288,7 @@ def approve_task(request, task_id):
     task.status = "in_progress"
     task.reviewed_date = timezone.now()
     task.save()
-
+#Job Assignment Logic will be adding here
     return JsonResponse({"message": "Task approved successfully"}, status=200)
 
 
@@ -316,3 +317,153 @@ def reject_task(request, task_id):
     task.save()
 
     return JsonResponse({"message": "Task rejected successfully"}, status=200)
+
+@csrf_exempt
+def SellerList(request):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    sellers = SellerProfile.objects.select_related("user").all()
+
+    data = []
+    for seller in sellers:
+        data.append(
+            {
+                "id": seller.id,
+                "Rating": seller.ratings,
+                "AvgTime": float(seller.avgCompletionTime),
+                "SuccessRate": float(seller.sucessRate),
+            }
+        )
+
+    return JsonResponse({"sellers": data}, status=200)
+
+@csrf_exempt
+def getRatingIndexes(request):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    try:
+        indexes = RatingIndexes.objects.first()
+        if not indexes:
+            return JsonResponse({"error": "Rating indexes not found"}, status=404)
+
+        data = {
+            "rate1": indexes.rate1,
+            "rate2": indexes.rate2,
+            "rate3": indexes.rate3,
+            "rate4": indexes.rate4,
+            "rate5": indexes.rate5,
+        }
+
+        return JsonResponse({"ratingIndexes": data}, status=200)
+
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+    
+
+
+@csrf_exempt
+def assign_jobs_api(request):
+    print("API HIT")
+
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST allowed"}, status=405)
+
+    try:
+        body = json.loads(request.body)
+
+        sellers_data = body.get("sellers", [])
+        jobs_data = body.get("jobs", {})
+        task_id = body.get("taskId")
+
+        task = BuyerTasks.objects.get(id=task_id)
+
+        # ✅ Step 1: Validate & normalize sellers
+        valid_sellers = []
+
+        for seller in sellers_data:
+            try:
+                seller_id = int(seller.get("id"))
+                rating = int(seller.get("Rating"))
+                valid_sellers.append({"id": seller_id, "Rating": rating})
+            except:
+                continue  # skip bad data
+
+        # ✅ Step 2: group sellers by rating
+        sellers_by_rating = {
+            "rate1": [],
+            "rate2": [],
+            "rate3": [],
+            "rate4": [],
+            "rate5": []
+        }
+
+        for seller in valid_sellers:
+            rating_key = f"rate{seller['Rating']}"
+            if rating_key in sellers_by_rating:
+                sellers_by_rating[rating_key].append(seller["id"])
+
+        print("Sellers by rating:", sellers_by_rating)
+        print("Jobs data:", jobs_data)
+
+        with transaction.atomic():
+            tracker, _ = RatingIndexes.objects.select_for_update().get_or_create(id=1)
+
+            for rating_key in sellers_by_rating.keys():
+                seller_ids = sellers_by_rating[rating_key]
+                jobs_count = int(jobs_data.get(rating_key, 0))
+
+                if not seller_ids or jobs_count == 0:
+                    continue
+
+                # ✅ Step 3: fetch ONLY valid sellers from DB
+                db_sellers = list(
+                    SellerProfile.objects.filter(id__in=seller_ids).values_list("id", flat=True)
+                )
+
+                if not db_sellers:
+                    print(f"No valid sellers in DB for {rating_key}")
+                    continue
+
+                last_index = getattr(tracker, rating_key)
+
+                assigned_ids, new_index = assign_jobs_round_robin(
+                    db_sellers,
+                    jobs_count,
+                    last_index
+                )
+
+                print("---- DEBUG ----")
+                print("Rating:", rating_key)
+                print("DB Sellers:", db_sellers)
+                print("Jobs Count:", jobs_count)
+                print("Assigned IDs:", assigned_ids)
+                print("----------------")
+
+                # ✅ Step 4: create jobs safely
+                jobs_to_create = [
+                    JobsHistory(
+                        seller_id=seller_id,
+                        task=task,
+                        taskId=task_id
+                    )
+                    for seller_id in assigned_ids
+                ]
+
+                print("Creating jobs:", len(jobs_to_create))
+
+                # 🔥 SAFE INSERT
+                for job in jobs_to_create:
+                    job.save()
+
+                # update index
+                setattr(tracker, rating_key, new_index)
+
+            tracker.save()
+
+        return JsonResponse({"status": "Jobs assigned successfully"}, status=200)
+
+    except Exception as e:
+        print("ERROR:", str(e))
+        return JsonResponse({"error": str(e)}, status=500)
