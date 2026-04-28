@@ -12,6 +12,7 @@ import { Textarea } from './ui/textarea';
 import { useState, useEffect } from 'react';
 
 export default function SellerDashboard({ onNavigate, onLogout }) {
+  const STORAGE_KEY = 'engageXUser';
   const [availableTasks, setAvailableTasks] = useState([]);
   const [activeTask, setActiveTask] = useState(null);
   const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
@@ -162,6 +163,17 @@ export default function SellerDashboard({ onNavigate, onLogout }) {
     return <Badge variant="outline" className="border-orange-200 text-orange-700">Medium</Badge>;
   };
 
+  const handleLogoutClick = () => {
+    localStorage.removeItem(STORAGE_KEY);
+
+    if (onLogout) {
+      onLogout();
+      return;
+    }
+
+    window.location.href = '/';
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
@@ -176,9 +188,12 @@ export default function SellerDashboard({ onNavigate, onLogout }) {
               <Badge className="ml-2 bg-green-100 text-green-700 hover:bg-green-100">Seller</Badge>
             </div>
             <div className="flex items-center gap-4">
-              <Button variant="ghost" size="sm" onClick={() => onNavigate('buyer')}>Switch to Buyer</Button>
-              <Button variant="ghost" size="sm" onClick={onLogout}>
-                <LogOut className="w-4 h-4 mr-2" />Logout
+              <Button variant="ghost" size="sm" onClick={() => onNavigate('buyer')}>
+                Switch to Buyer
+              </Button>
+              <Button variant="ghost" size="sm" onClick={handleLogoutClick}>
+                <LogOut className="w-4 h-4 mr-2" />
+                Logout
               </Button>
             </div>
           </div>

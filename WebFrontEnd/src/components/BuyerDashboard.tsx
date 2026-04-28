@@ -10,9 +10,9 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Badge } from './ui/badge';
 import { Progress } from './ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { useLocation } from 'react-router-dom';
 
 export default function BuyerDashboard({ onNavigate, onLogout }) {
+  const STORAGE_KEY = 'engageXUser';
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
   const [taskForm, setTaskForm] = useState({
     title: '',
@@ -30,10 +30,23 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
     performance: 0,
     tasks: [],
   });
+  const [user, setUser] = useState(null);
 
-  const location = useLocation();
-  const user = location.state?.userData;
   const loggedInUserName = user?.userName || 'Buyer';
+
+  useEffect(() => {
+    const savedUser = localStorage.getItem(STORAGE_KEY);
+
+    if (!savedUser) {
+      return;
+    }
+
+    try {
+      setUser(JSON.parse(savedUser));
+    } catch (error) {
+      console.error('User session read failed:', error);
+    }
+  }, []);
 
   useEffect(() => {
     if (!user?.userId) return;
@@ -128,6 +141,17 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
     }
   };
 
+  const handleLogoutClick = () => {
+    localStorage.removeItem(STORAGE_KEY);
+
+    if (onLogout) {
+      onLogout();
+      return;
+    }
+
+    window.location.href = '/';
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
@@ -144,7 +168,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
               <Button variant="ghost" size="sm" onClick={() => onNavigate('seller')}>
                 Switch to Seller
               </Button>
-              <Button variant="ghost" size="sm" onClick={onLogout}>
+              <Button variant="ghost" size="sm" onClick={handleLogoutClick}>
                 <LogOut className="w-4 h-4 mr-2" />
                 Logout
               </Button>

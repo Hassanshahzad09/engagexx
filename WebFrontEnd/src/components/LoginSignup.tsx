@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { ArrowLeft, Mail, Lock, User, Zap, CheckCircle } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
@@ -9,7 +8,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 
 export default function LoginSignup({ onLogin, onBack }) {
-  const navigate = useNavigate();
+  const STORAGE_KEY = 'engageXUser';
   const [isLogin, setIsLogin] = useState(true);
   const [userType, setUserType] = useState('buyer');
   const [loginBtn, setLoginBtn] = useState(false);
@@ -27,6 +26,7 @@ export default function LoginSignup({ onLogin, onBack }) {
     userPassword: '',
   });
   const [isLoading, setLoading] = useState(false);
+  const [hasSavedSession, setHasSavedSession] = useState(false);
 
   const features = [
     'Secure payment processing',
@@ -34,6 +34,10 @@ export default function LoginSignup({ onLogin, onBack }) {
     '24/7 customer support',
     'Verified user community',
   ];
+
+  useEffect(() => {
+    setHasSavedSession(Boolean(localStorage.getItem(STORAGE_KEY)));
+  }, []);
 
   useEffect(() => {
     if (loginBtn) {
@@ -65,15 +69,7 @@ export default function LoginSignup({ onLogin, onBack }) {
                 isAdmin: data.isAdmin,
               };
 
-              if (data.isAdmin) {
-                onLogin('admin');
-              } else if (data.role === 'seller') {
-                onLogin('seller');
-              } else {
-                navigate('/buyer-dashboard', {
-                  state: { userData: user },
-                });
-              }
+              onLogin(user);
             } else if (response.status === 400) {
               alert(data.error);
             } else {
@@ -232,6 +228,12 @@ export default function LoginSignup({ onLogin, onBack }) {
     setLoginBtn(true);
   };
 
+  const handleLogout = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    setHasSavedSession(false);
+    alert('Logged out successfully');
+  };
+
   return (
     <>
       {isLoading ? <Loader /> : (
@@ -268,10 +270,17 @@ export default function LoginSignup({ onLogin, onBack }) {
 
             <Card className="border-gray-200 rounded-2xl shadow-xl w-full">
               <CardHeader className="p-4 sm:p-6">
-                <Button variant="ghost" size="sm" onClick={onBack} className="w-fit -ml-2 mb-4">
-                  <ArrowLeft className="w-4 h-4 mr-2" />
-                  Back to Home
-                </Button>
+                <div className="flex items-center justify-between mb-4">
+                  <Button variant="ghost" size="sm" onClick={onBack} className="w-fit -ml-2">
+                    <ArrowLeft className="w-4 h-4 mr-2" />
+                    Back to Home
+                  </Button>
+                  {hasSavedSession && (
+                    <Button variant="outline" size="sm" onClick={handleLogout} className="rounded-full">
+                      Logout
+                    </Button>
+                  )}
+                </div>
                 <CardTitle className="text-gray-900">
                   {isLogin ? 'Sign In' : 'Create Account'}
                 </CardTitle>
