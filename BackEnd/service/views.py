@@ -245,6 +245,64 @@ def admin_pending_tasks(request):
     return JsonResponse({"tasks": data}, status=200)
 
 
+def admin_dashboard_stats(request):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    tasks = BuyerTasks.objects.select_related("buyer__user").all().order_by("-startDate")
+    pending_count = tasks.filter(approval_status="pending").count()
+    approved_count = tasks.filter(approval_status="approved").count()
+    rejected_count = tasks.filter(approval_status="rejected").count()
+    completed_count = tasks.filter(status="completed").count()
+    buyer_count = BuyerProfile.objects.count()
+    seller_count = SellerProfile.objects.count()
+
+    platform_counts = {}
+    approved_tasks_data = []
+
+    for task in tasks:
+        platform_name = task.platform.title()
+        platform_counts[platform_name] = platform_counts.get(platform_name, 0) + 1
+
+        if task.approval_status == "approved":
+            approved_tasks_data.append(
+                {
+                    "id": task.id,
+                    "buyerName": task.buyer.user.username,
+                    "title": task.title,
+                    "platform": platform_name,
+                    "taskType": task.taskType.title(),
+                    "goal": float(task.goal),
+                    "progressed": float(task.progressed),
+                    "pricePerAction": float(task.pricePerAction),
+                    "created": task.startDate.strftime("%Y-%m-%d %H:%M") if task.startDate else "",
+                    "status": task.status,
+                }
+            )
+
+    platform_data = [
+        {"name": name, "value": value}
+        for name, value in platform_counts.items()
+    ]
+
+    return JsonResponse(
+        {
+            "stats": {
+                "totalBuyerAccounts": buyer_count,
+                "totalSellerAccounts": seller_count,
+                "totalTasks": tasks.count(),
+                "pendingTasks": pending_count,
+                "approvedTasks": approved_count,
+                "rejectedTasks": rejected_count,
+                "completedTasks": completed_count,
+            },
+            "approvedTasksList": approved_tasks_data,
+            "platformDistribution": platform_data,
+        },
+        status=200,
+    )
+
+
 def approved_tasks(request):
     if request.method != "GET":
         return JsonResponse({"error": "Only GET method allowed"}, status=405)
