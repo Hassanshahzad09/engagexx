@@ -1,0 +1,44 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Frontend: Vite",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "npm run dev",
+      "cwd": "${workspaceFolder}/WebFrontEnd",
+      "serverReadyAction": {
+        "pattern": "Local:\\s+(http://\\S+)",
+        "uriFormat": "%s",
+        "action": "openExternally"
+      }
+    },
+    {
+      "name": "Backend: Django",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/BackEnd/manage.py",
+      "args": [
+        "runserver",
+        "127.0.0.1:8000"
+      ],
+      "cwd": "${workspaceFolder}/BackEnd",
+      "django": true,
+      "console": "integratedTerminal",
+      "serverReadyAction": {
+        "pattern": "Starting development server at (http://\\S+)",
+        "uriFormat": "%s",
+        "action": "openExternally"
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full Stack: Frontend + Backend",
+      "configurations": [
+        "Backend: Django",
+        "Frontend: Vite"
+      ]
+    }
+  ]
+}

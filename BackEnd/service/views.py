@@ -1,14 +1,16 @@
 import json
-
+from decimal import Decimal, InvalidOperation
+import requests
 from django.contrib.auth.hashers import check_password, make_password
+from django.db.models import Count, Sum
+from django.db.models.functions import TruncMonth
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-from httpcore import request
 from BackEnd.utils import assign_jobs_round_robin
-from .models import BuyerProfile, BuyerTasks, RatingIndexes, SellerProfile, User,JobsHistory
+from .models import BuyerProfile, BuyerTasks, RatingIndexes, SellerProfile, User,JobsHistory,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
 from django.db import transaction
-
+from django.views.decorators.http import require_http_methods
 @csrf_exempt
 def signup(request):
     if request.method != "POST":
@@ -122,6 +124,104 @@ def login(request):
 
 
 @csrf_exempt
+def get_wallet_balance(request, user_id):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    return JsonResponse(
+        {
+            "userId": user.id,
+            "username": user.username,
+            "role": user.role,
+            "walletBalance": float(user.wallet_balance or 0),
+        },
+        status=200,
+    )
+
+
+@csrf_exempt
+def add_funds(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
+    user_id = data.get("userId")
+    amount = data.get("amount")
+    payment_method = data.get("paymentMethod", "manual")
+    description = data.get("description", "Wallet top up")
+
+    if not user_id:
+        return JsonResponse({"error": "userId is required"}, status=400)
+
+    try:
+        amount = Decimal(str(amount))
+    except (InvalidOperation, TypeError):
+        return JsonResponse({"error": "Invalid amount"}, status=400)
+
+    if amount <= 0:
+        return JsonResponse({"error": "Amount must be greater than zero"}, status=400)
+
+    try:
+        with transaction.atomic():
+            user = User.objects.select_for_update().get(id=user_id)
+            user.wallet_balance = (user.wallet_balance or Decimal("0.00")) + amount
+            user.save(update_fields=["wallet_balance"])
+
+            Transaction.objects.create(
+                user=user,
+                amount=amount,
+                type="deposit",
+                description=f"{description} via {payment_method}",
+            )
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    return JsonResponse(
+        {
+            "message": "Funds added successfully",
+            "walletBalance": float(user.wallet_balance),
+        },
+        status=200,
+    )
+
+
+@csrf_exempt
+def get_transactions(request, user_id):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    try:
+        user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
+    transactions = Transaction.objects.filter(user=user).order_by("-created_at")
+    data = []
+
+    for item in transactions:
+        data.append(
+            {
+                "id": item.id,
+                "amount": float(item.amount),
+                "type": item.type,
+                "description": item.description,
+                "created_at": item.created_at.strftime("%Y-%m-%d %H:%M"),
+            }
+        )
+
+    return JsonResponse({"transactions": data}, status=200)
+
+
+@csrf_exempt
 def create_task(request):
     if request.method != "POST":
         return JsonResponse({"error": "Only POST method allowed"}, status=405)
@@ -149,22 +249,32 @@ def create_task(request):
         return JsonResponse({"error": "Goal and price are required"}, status=400)
 
     try:
-        buyer_profile = BuyerProfile.objects.get(user__id=user_id)
+        goal = Decimal(str(goal))
+        price_per_action = Decimal(str(price_per_action))
+
+        if goal <= 0 or price_per_action <= 0:
+            return JsonResponse({"error": "Goal and price must be greater than zero"}, status=400)
+
+        with transaction.atomic():
+            buyer_user = User.objects.get(id=user_id)
+            buyer_profile = BuyerProfile.objects.get(user=buyer_user)
+
+            task = BuyerTasks.objects.create(
+                buyer=buyer_profile,
+                title=title,
+                platform=platform,
+                taskType=task_type,
+                url=url,
+                goal=goal,
+                pricePerAction=price_per_action,
+                progressed=0,
+                status="pending",
+                approval_status="pending",
+            )
     except BuyerProfile.DoesNotExist:
         return JsonResponse({"error": "Buyer profile not found"}, status=404)
-
-    task = BuyerTasks.objects.create(
-        buyer=buyer_profile,
-        title=title,
-        platform=platform,
-        taskType=task_type,
-        url=url,
-        goal=goal,
-        pricePerAction=price_per_action,
-        progressed=0,
-        status="pending",
-        approval_status="pending",
-    )
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
 
     return JsonResponse(
         {
@@ -245,30 +355,389 @@ def admin_pending_tasks(request):
     return JsonResponse({"tasks": data}, status=200)
 
 
-def approved_tasks(request):
+def admin_active_tasks(request):
     if request.method != "GET":
         return JsonResponse({"error": "Only GET method allowed"}, status=405)
 
-    tasks = BuyerTasks.objects.filter(approval_status="approved").exclude(status="completed")
+    tasks = BuyerTasks.objects.filter(
+        approval_status="approved"
+    ).exclude(
+        status="completed"
+    ).select_related("buyer__user").prefetch_related("jobs")
 
     data = []
     for task in tasks:
-        remaining = float(task.goal) - float(task.progressed)
         data.append(
             {
                 "id": task.id,
+                "buyerName": task.buyer.user.username,
                 "title": task.title,
                 "platform": task.platform.title(),
-                "type": task.taskType.title(),
-                "price": float(task.pricePerAction),
-                "remaining": max(remaining, 0),
-                "total": float(task.goal),
-                "timeEstimate": "2 min",
-                "difficulty": "Easy",
+                "taskType": task.taskType.title(),
+                "goal": float(task.goal),
+                "progressed": float(task.progressed),
+                "pricePerAction": float(task.pricePerAction),
+                "url": task.url,
+                "status": task.status,
+                "assignedSellers": task.jobs.count(),
+                "created": task.startDate.strftime("%Y-%m-%d %H:%M") if task.startDate else "",
             }
         )
 
     return JsonResponse({"tasks": data}, status=200)
+
+
+def admin_dashboard_summary(request):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    total_revenue = Transaction.objects.filter(type="escrow_in").aggregate(
+        total=Sum("amount")
+    )["total"] or Decimal("0.00")
+
+    monthly_revenue = Transaction.objects.filter(type="escrow_in").annotate(
+        month=TruncMonth("created_at")
+    ).values("month").annotate(
+        revenue=Sum("amount")
+    ).order_by("month")
+
+    monthly_users = User.objects.annotate(
+        month=TruncMonth("date_joined")
+    ).values("month").annotate(
+        users=Count("id")
+    ).order_by("month")
+
+    monthly_data = {}
+    for item in monthly_revenue:
+        if item["month"]:
+            key = item["month"].strftime("%Y-%m")
+            monthly_data[key] = {
+                "name": item["month"].strftime("%b %Y"),
+                "revenue": float(item["revenue"] or 0),
+                "users": 0,
+            }
+
+    for item in monthly_users:
+        if item["month"]:
+            key = item["month"].strftime("%Y-%m")
+            if key not in monthly_data:
+                monthly_data[key] = {
+                    "name": item["month"].strftime("%b %Y"),
+                    "revenue": 0,
+                    "users": 0,
+                }
+            monthly_data[key]["users"] = item["users"]
+
+    task_distribution = []
+    for item in BuyerTasks.objects.values("platform").annotate(value=Count("id")).order_by("-value"):
+        task_distribution.append(
+            {
+                "name": (item["platform"] or "Unknown").title(),
+                "value": item["value"],
+            }
+        )
+
+    recent_users = []
+    for user in User.objects.order_by("-date_joined")[:10]:
+        user_type = "Admin" if user.is_staff or user.is_superuser else (user.role or "User").title()
+        recent_users.append(
+            {
+                "id": user.id,
+                "name": user.get_full_name() or user.username,
+                "email": user.email,
+                "type": user_type,
+                "status": "Active" if user.is_active else "Suspended",
+                "joined": user.date_joined.strftime("%Y-%m-%d") if user.date_joined else "",
+            }
+        )
+
+    flagged_users = []
+    flagged_sellers = SellerProfile.objects.filter(
+        unethical_reports__gt=0
+    ).select_related("user").order_by("-unethical_reports")
+
+    for seller in flagged_sellers:
+        flagged_users.append(
+            {
+                "id": seller.user.id,
+                "name": seller.user.get_full_name() or seller.user.username,
+                "email": seller.user.email,
+                "type": "Seller",
+                "status": "Active" if seller.user.is_active else "Suspended",
+                "joined": seller.user.date_joined.strftime("%Y-%m-%d") if seller.user.date_joined else "",
+                "reports": seller.unethical_reports,
+            }
+        )
+
+    return JsonResponse(
+        {
+            "stats": {
+                "totalUsers": User.objects.count(),
+                "revenue": float(total_revenue),
+                "activeTasks": BuyerTasks.objects.filter(
+                    approval_status="approved"
+                ).exclude(status="completed").count(),
+                "pendingTasks": BuyerTasks.objects.filter(approval_status="pending").count(),
+            },
+            "revenueData": list(monthly_data.values()),
+            "taskDistribution": task_distribution,
+            "recentUsers": recent_users,
+            "flaggedUsers": flagged_users,
+        },
+        status=200,
+    )
+
+
+def get_seller_profile_from_user_id(user_id):
+    try:
+        return SellerProfile.objects.get(user_id=user_id)
+    except SellerProfile.DoesNotExist:
+        return SellerProfile.objects.get(id=user_id)
+
+
+def assign_task_to_available_sellers(task):
+    sellers = SellerProfile.objects.all()
+    assigned_count = 0
+
+    for seller in sellers:
+        _, created = JobsHistory.objects.get_or_create(
+            task=task,
+            seller=seller,
+            defaults={"taskId": task.id, "status": "pending"},
+        )
+        if created:
+            assigned_count += 1
+
+    return assigned_count
+
+
+def approved_tasks(request):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    userId = request.GET.get("userId")
+    if not userId:
+        return JsonResponse({"error": "userId is required"}, status=400)
+
+    try:
+        seller_profile = get_seller_profile_from_user_id(userId)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
+
+    jobs = JobsHistory.objects.filter(
+        status="pending",
+        seller=seller_profile,
+        task__approval_status="approved",
+    ).select_related("task")
+
+    data = []
+
+    for job in jobs:
+        task = job.task
+        goal = float(task.goal or 0)
+        progressed = float(task.progressed or 0)
+        price = float(task.pricePerAction or 0)
+        remaining = goal - progressed
+
+        data.append({
+            "id": task.id,
+            "jobId": job.id,
+            "title": task.title,
+            "platform": (task.platform or "").title(),
+            "type": (task.taskType or "").title(),
+            "url": task.url,
+            "price": price,
+            "remaining": max(remaining, 0),
+            "total": goal,
+            "timeEstimate": "2 min",
+            "difficulty": "Easy",
+            "status": "assigned",
+        })
+
+    return JsonResponse({"tasks": data}, status=200)
+
+
+@csrf_exempt
+def submit_task(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
+    task_id = data.get("taskId")
+    seller_id = data.get("sellerId")
+    proof_url = data.get("proofUrl", "")
+    notes = data.get("notes", "")
+    time_spent = data.get("timeSpent", 0)
+
+    if not task_id or not seller_id:
+        return JsonResponse({"error": "taskId and sellerId are required"}, status=400)
+
+    if not proof_url:
+        return JsonResponse({"error": "Proof URL is required"}, status=400)
+
+    try:
+        time_spent = Decimal(str(time_spent))
+    except (InvalidOperation, TypeError):
+        time_spent = Decimal("0.00")
+
+    try:
+        with transaction.atomic():
+            seller_profile = get_seller_profile_from_user_id(seller_id)
+            task = BuyerTasks.objects.select_for_update().get(id=task_id)
+            virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
+            job = JobsHistory.objects.select_for_update().get(
+                task=task,
+                seller=seller_profile,
+                status="pending",
+            )
+
+            if virtual_wallet.status != "holding":
+                return JsonResponse({"error": "Task payment is not available"}, status=400)
+
+            seller_user = seller_profile.user
+            seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) + virtual_wallet.amount
+            seller_user.save(update_fields=["wallet_balance"])
+
+            seller_profile.totalEarnings = (seller_profile.totalEarnings or Decimal("0.00")) + virtual_wallet.amount
+            seller_profile.avgCompletionTime = time_spent
+            seller_profile.save(update_fields=["totalEarnings", "avgCompletionTime"])
+
+            job.proofUrl = proof_url
+            job.notes = notes
+            job.completionTime = time_spent
+            job.status = "completed"
+            job.progress = task.goal
+            job.priceEarned = virtual_wallet.amount
+            job.endDate = timezone.now()
+            job.save(update_fields=[
+                "proofUrl",
+                "notes",
+                "completionTime",
+                "status",
+                "progress",
+                "priceEarned",
+                "endDate",
+            ])
+
+            virtual_wallet.status = "released"
+            virtual_wallet.seller = seller_profile
+            virtual_wallet.save(update_fields=["status", "seller", "updated_at"])
+
+            task.status = "completed"
+            task.progressed = task.goal
+            task.endDate = timezone.now()
+            task.save(update_fields=["status", "progressed", "endDate"])
+
+            Transaction.objects.create(
+                user=seller_user,
+                amount=virtual_wallet.amount,
+                type="escrow_release",
+                description=f"Task completed: {task.title}",
+            )
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
+    except BuyerTasks.DoesNotExist:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except JobsHistory.DoesNotExist:
+        return JsonResponse({"error": "This task is not assigned to this seller"}, status=400)
+    except VirtualWallet.DoesNotExist:
+        return JsonResponse({"error": "Task payment wallet not found"}, status=404)
+
+    return JsonResponse({"message": "Task submitted successfully and payment released"}, status=200)
+
+
+def seller_dashboard_stats(request, user_id):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    try:
+        seller_profile = get_seller_profile_from_user_id(user_id)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
+
+    seller_user = seller_profile.user
+    jobs = JobsHistory.objects.filter(seller=seller_profile).select_related("task")
+    completed_jobs = jobs.filter(status="completed")
+    pending_jobs = jobs.filter(status="pending")
+    total_jobs = jobs.count()
+    completed_count = completed_jobs.count()
+    success_rate = round((completed_count / total_jobs) * 100, 2) if total_jobs else 0
+
+    my_tasks = []
+    for job in jobs.order_by("-startDate")[:10]:
+        my_tasks.append({
+            "id": job.id,
+            "title": job.task.title,
+            "platform": job.task.platform.title(),
+            "price": float(job.task.pricePerAction or 0),
+            "status": "assigned" if job.status == "pending" else job.status,
+            "submitted": job.endDate.strftime("%Y-%m-%d %H:%M") if job.endDate else job.startDate.strftime("%Y-%m-%d %H:%M"),
+            "earnings": float(job.priceEarned or 0),
+        })
+
+    return JsonResponse({
+        "walletBalance": float(seller_user.wallet_balance or 0),
+        "totalEarnings": float(seller_profile.totalEarnings or 0),
+        "tasksCompleted": completed_count,
+        "inProgress": pending_jobs.count(),
+        "successRate": success_rate,
+        "avgCompletionTime": float(seller_profile.avgCompletionTime or 0),
+        "myTasks": my_tasks,
+    }, status=200)
+
+
+@csrf_exempt
+def withdraw_funds(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
+    seller_id = data.get("sellerId")
+    amount = data.get("amount")
+
+    if not seller_id:
+        return JsonResponse({"error": "sellerId is required"}, status=400)
+
+    try:
+        amount = Decimal(str(amount))
+    except (InvalidOperation, TypeError):
+        return JsonResponse({"error": "Invalid amount"}, status=400)
+
+    if amount <= 0:
+        return JsonResponse({"error": "Amount must be greater than zero"}, status=400)
+
+    try:
+        with transaction.atomic():
+            seller_profile = get_seller_profile_from_user_id(seller_id)
+            seller_user = User.objects.select_for_update().get(id=seller_profile.user.id)
+
+            if (seller_user.wallet_balance or Decimal("0.00")) < amount:
+                return JsonResponse({"error": "Not enough wallet balance"}, status=400)
+
+            seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) - amount
+            seller_user.save(update_fields=["wallet_balance"])
+
+            Transaction.objects.create(
+                user=seller_user,
+                amount=amount,
+                type="withdraw",
+                description="Seller withdrawal request",
+            )
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
+
+    return JsonResponse({
+        "message": "Withdraw request completed",
+        "walletBalance": float(seller_user.wallet_balance),
+    }, status=200)
 
 
 @csrf_exempt
@@ -277,19 +746,53 @@ def approve_task(request, task_id):
         return JsonResponse({"error": "Only POST method allowed"}, status=405)
 
     try:
-        task = BuyerTasks.objects.get(id=task_id)
+        with transaction.atomic():
+            task = BuyerTasks.objects.select_for_update().get(id=task_id)
+
+            if task.approval_status != "pending":
+                return JsonResponse({"error": "Task already reviewed"}, status=400)
+
+            total_cost = task.goal * task.pricePerAction
+            virtual_wallet = VirtualWallet.objects.filter(task=task).first()
+
+            if virtual_wallet is None:
+                buyer_user = User.objects.select_for_update().get(id=task.buyer.user.id)
+
+                if (buyer_user.wallet_balance or Decimal("0.00")) < total_cost:
+                    return JsonResponse(
+                        {"error": "Buyer does not have enough wallet balance to approve this task"},
+                        status=400,
+                    )
+
+                buyer_user.wallet_balance = (buyer_user.wallet_balance or Decimal("0.00")) - total_cost
+                buyer_user.save(update_fields=["wallet_balance"])
+
+                VirtualWallet.objects.create(
+                    task=task,
+                    buyer=task.buyer,
+                    amount=total_cost,
+                    status="holding",
+                )
+
+                Transaction.objects.create(
+                    user=buyer_user,
+                    amount=total_cost,
+                    type="escrow_in",
+                    description=f"Escrow locked after admin approval for task: {task.title}",
+                )
+
+            task.approval_status = "approved"
+            task.status = "in_progress"
+            task.reviewed_date = timezone.now()
+            task.save(update_fields=["approval_status", "status", "reviewed_date"])
+
+            if not JobsHistory.objects.filter(task=task, status="pending").exists():
+                assign_task_to_available_sellers(task)
     except BuyerTasks.DoesNotExist:
         return JsonResponse({"error": "Task not found"}, status=404)
 
-    if task.approval_status != "pending":
-        return JsonResponse({"error": "Task already reviewed"}, status=400)
-
-    task.approval_status = "approved"
-    task.status = "in_progress"
-    task.reviewed_date = timezone.now()
-    task.save()
 #Job Assignment Logic will be adding here
-    return JsonResponse({"message": "Task approved successfully"}, status=200)
+    return JsonResponse({"message": "Task approved successfully and amount deducted from buyer wallet"}, status=200)
 
 
 @csrf_exempt
@@ -317,6 +820,280 @@ def reject_task(request, task_id):
     task.save()
 
     return JsonResponse({"message": "Task rejected successfully"}, status=200)
+
+@csrf_exempt
+def complete_task(request, task_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        data = {}
+
+    seller_id = data.get("sellerId")
+    if not seller_id:
+        return JsonResponse({"error": "sellerId is required"}, status=400)
+
+    try:
+        with transaction.atomic():
+            task = BuyerTasks.objects.select_for_update().get(id=task_id)
+            seller_profile = SellerProfile.objects.select_for_update().get(id=seller_id)
+            virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
+
+            if virtual_wallet.status != "holding":
+                return JsonResponse({"error": "Wallet is not in holding state"}, status=400)
+
+            job_exists = JobsHistory.objects.filter(task=task, seller=seller_profile).exists()
+            if not job_exists:
+                return JsonResponse({"error": "Seller is not assigned to this task"}, status=400)
+
+            seller_user = seller_profile.user
+            seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) + virtual_wallet.amount
+            seller_user.save(update_fields=["wallet_balance"])
+
+            seller_profile.totalEarnings = (seller_profile.totalEarnings or Decimal("0.00")) + virtual_wallet.amount
+            seller_profile.save(update_fields=["totalEarnings"])
+
+            virtual_wallet.status = "released"
+            virtual_wallet.seller = seller_profile
+            virtual_wallet.save(update_fields=["status", "seller", "updated_at"])
+
+            task.status = "completed"
+            task.endDate = timezone.now()
+            task.save(update_fields=["status", "endDate"])
+
+            JobsHistory.objects.filter(task=task, seller=seller_profile).update(
+                status="completed",
+                progress=task.goal,
+                priceEarned=virtual_wallet.amount,
+                endDate=timezone.now(),
+            )
+
+            Transaction.objects.create(
+                user=seller_user,
+                amount=virtual_wallet.amount,
+                type="escrow_release",
+                description=f"Task completed: {task.title}",
+            )
+    except BuyerTasks.DoesNotExist:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller not found"}, status=404)
+    except VirtualWallet.DoesNotExist:
+        return JsonResponse({"error": "Virtual wallet not found"}, status=404)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"message": "Task completed and money released to seller"}, status=200)
+
+
+@csrf_exempt
+def report_unethical_task(request, task_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        data = {}
+
+    seller_id = data.get("sellerId")
+    reason = data.get("reason", "Unethical task behavior")
+    if not seller_id:
+        return JsonResponse({"error": "sellerId is required"}, status=400)
+
+    try:
+        with transaction.atomic():
+            task = BuyerTasks.objects.select_for_update().get(id=task_id)
+            seller_profile = SellerProfile.objects.select_for_update().get(id=seller_id)
+            virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
+
+            if virtual_wallet.status != "holding":
+                return JsonResponse({"error": "Wallet is not in holding state"}, status=400)
+
+            buyer_user = virtual_wallet.buyer.user
+            refund_amount = virtual_wallet.amount
+
+            buyer_user.wallet_balance = (buyer_user.wallet_balance or Decimal("0.00")) + refund_amount
+            buyer_user.save(update_fields=["wallet_balance"])
+
+            virtual_wallet.status = "refunded"
+            virtual_wallet.save(update_fields=["status", "updated_at"])
+
+            task.status = "rejected"
+            task.approval_status = "rejected"
+            task.rejection_reason = reason
+            task.reviewed_date = timezone.now()
+            task.save(update_fields=["status", "approval_status", "rejection_reason", "reviewed_date"])
+
+            seller_profile.unethical_reports = (seller_profile.unethical_reports or 0) + 1
+            seller_profile.save(update_fields=["unethical_reports"])
+
+            if seller_profile.unethical_reports >= 3:
+                seller_profile.user.is_active = False
+                seller_profile.user.save(update_fields=["is_active"])
+
+            JobsHistory.objects.filter(task=task, seller=seller_profile).update(
+                status="rejected",
+                endDate=timezone.now(),
+            )
+
+            Transaction.objects.create(
+                user=buyer_user,
+                amount=refund_amount,
+                type="refund",
+                description=f"Refund for unethical task: {task.title}",
+            )
+
+    except BuyerTasks.DoesNotExist:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller not found"}, status=404)
+    except VirtualWallet.DoesNotExist:
+        return JsonResponse({"error": "Virtual wallet not found"}, status=404)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"message": "Task marked unethical and refunded to buyer"}, status=200)
+
+
+
+@csrf_exempt
+def complete_task(request, task_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        data = {}
+
+    seller_id = data.get("sellerId")
+    if not seller_id:
+        return JsonResponse({"error": "sellerId is required"}, status=400)
+
+    try:
+        with transaction.atomic():
+            task = BuyerTasks.objects.select_for_update().get(id=task_id)
+            seller_profile = SellerProfile.objects.select_for_update().get(id=seller_id)
+            virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
+
+            if virtual_wallet.status != "holding":
+                return JsonResponse({"error": "Wallet is not in holding state"}, status=400)
+
+            job_exists = JobsHistory.objects.filter(task=task, seller=seller_profile).exists()
+            if not job_exists:
+                return JsonResponse({"error": "Seller is not assigned to this task"}, status=400)
+
+            seller_user = seller_profile.user
+            seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) + virtual_wallet.amount
+            seller_user.save(update_fields=["wallet_balance"])
+
+            seller_profile.totalEarnings = (seller_profile.totalEarnings or Decimal("0.00")) + virtual_wallet.amount
+            seller_profile.save(update_fields=["totalEarnings"])
+
+            virtual_wallet.status = "released"
+            virtual_wallet.seller = seller_profile
+            virtual_wallet.save(update_fields=["status", "seller", "updated_at"])
+
+            task.status = "completed"
+            task.endDate = timezone.now()
+            task.save(update_fields=["status", "endDate"])
+
+            JobsHistory.objects.filter(task=task, seller=seller_profile).update(
+                status="completed",
+                progress=task.goal,
+                priceEarned=virtual_wallet.amount,
+                endDate=timezone.now(),
+            )
+
+            Transaction.objects.create(
+                user=seller_user,
+                amount=virtual_wallet.amount,
+                type="escrow_release",
+                description=f"Task completed: {task.title}",
+            )
+    except BuyerTasks.DoesNotExist:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller not found"}, status=404)
+    except VirtualWallet.DoesNotExist:
+        return JsonResponse({"error": "Virtual wallet not found"}, status=404)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"message": "Task completed and money released to seller"}, status=200)
+
+
+@csrf_exempt
+def report_unethical_task(request, task_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        data = {}
+
+    seller_id = data.get("sellerId")
+    reason = data.get("reason", "Unethical task behavior")
+    if not seller_id:
+        return JsonResponse({"error": "sellerId is required"}, status=400)
+
+    try:
+        with transaction.atomic():
+            task = BuyerTasks.objects.select_for_update().get(id=task_id)
+            seller_profile = SellerProfile.objects.select_for_update().get(id=seller_id)
+            virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
+
+            if virtual_wallet.status != "holding":
+                return JsonResponse({"error": "Wallet is not in holding state"}, status=400)
+
+            buyer_user = virtual_wallet.buyer.user
+            refund_amount = virtual_wallet.amount
+
+            buyer_user.wallet_balance = (buyer_user.wallet_balance or Decimal("0.00")) + refund_amount
+            buyer_user.save(update_fields=["wallet_balance"])
+
+            virtual_wallet.status = "refunded"
+            virtual_wallet.save(update_fields=["status", "updated_at"])
+
+            task.status = "rejected"
+            task.approval_status = "rejected"
+            task.rejection_reason = reason
+            task.reviewed_date = timezone.now()
+            task.save(update_fields=["status", "approval_status", "rejection_reason", "reviewed_date"])
+
+            seller_profile.unethical_reports = (seller_profile.unethical_reports or 0) + 1
+            seller_profile.save(update_fields=["unethical_reports"])
+
+            if seller_profile.unethical_reports >= 3:
+                seller_profile.user.is_active = False
+                seller_profile.user.save(update_fields=["is_active"])
+
+            JobsHistory.objects.filter(task=task, seller=seller_profile).update(
+                status="rejected",
+                endDate=timezone.now(),
+            )
+
+            Transaction.objects.create(
+                user=buyer_user,
+                amount=refund_amount,
+                type="refund",
+                description=f"Refund for unethical task: {task.title}",
+            )
+
+    except BuyerTasks.DoesNotExist:
+        return JsonResponse({"error": "Task not found"}, status=404)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller not found"}, status=404)
+    except VirtualWallet.DoesNotExist:
+        return JsonResponse({"error": "Virtual wallet not found"}, status=404)
+    except Exception as e:
+        return JsonResponse({"error": str(e)}, status=500)
+
+    return JsonResponse({"message": "Task marked unethical and refunded to buyer"}, status=200)
 
 @csrf_exempt
 def SellerList(request):
@@ -467,3 +1244,77 @@ def assign_jobs_api(request):
     except Exception as e:
         print("ERROR:", str(e))
         return JsonResponse({"error": str(e)}, status=500)
+
+
+
+
+
+
+
+
+def connections_status(request):
+    platforms = ['facebook', 'instagram', 'twitter', 'youtube']
+    seller_id = request.GET.get("sellerId")
+    result = {}
+
+    for platform in platforms:
+        try:
+            account = SocialAccount.objects.get(platform=platform, sellerId=seller_id)
+            token = account.access_token
+            is_valid = False
+
+            if platform == 'facebook':
+                response = requests.get(
+                    "https://graph.facebook.com/me",
+                    params={"access_token": token}
+                ).json()
+                is_valid = "id" in response
+
+            elif platform == 'instagram':
+                response = requests.get(
+                    "https://graph.facebook.com/me",
+                    params={"access_token": token}
+                ).json()
+                is_valid = "id" in response
+
+            elif platform == 'twitter':
+                response = requests.get(
+                    "https://api.twitter.com/2/users/me",
+                    headers={"Authorization": f"Bearer {token}"}
+                ).json()
+                is_valid = "data" in response
+
+            elif platform == 'youtube':
+                response = requests.get(
+                    "https://www.googleapis.com/youtube/v3/channels",
+                    params={"part": "snippet", "mine": "true"},
+                    headers={"Authorization": f"Bearer {token}"}
+                ).json()
+                is_valid = "items" in response and len(response["items"]) > 0
+
+            if is_valid:
+                result[platform] = {
+                    "connected": True,
+                    "username": account.username,
+                }
+            else:
+                print("InvalidToken")
+                account.delete()
+                result[platform] = {"connected": False, "username": None}
+
+        except SocialAccount.DoesNotExist:
+            result[platform] = {"connected": False, "username": None}
+
+    return JsonResponse(result)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+def disconnect_platform(request, platform):
+    try:
+        seller_id = request.GET.get("sellerId")
+        account = SocialAccount.objects.get(platform=platform, sellerId=seller_id)
+        account.delete()
+        return JsonResponse({"message": f"{platform} disconnected"})
+    except SocialAccount.DoesNotExist:
+        return JsonResponse({"error": "Not connected"}, status=404)

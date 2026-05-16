@@ -2,9 +2,46 @@
   import { defineConfig } from 'vite';
   import react from '@vitejs/plugin-react-swc';
   import path from 'path';
+  import { spawn } from 'child_process';
+  import { existsSync } from 'fs';
+
+  const browserPaths = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Mozilla Firefox\\firefox.exe',
+  ];
+
+  function openExternalBrowser(url: string) {
+    const browserPath = browserPaths.find((item) => existsSync(item));
+
+    if (!browserPath) {
+      return;
+    }
+
+    const browser = spawn(browserPath, [url], {
+      detached: true,
+      stdio: 'ignore',
+    });
+
+    browser.unref();
+  }
+
+  function openExternalBrowserPlugin() {
+    return {
+      name: 'open-external-browser',
+      configureServer(server) {
+        server.httpServer?.once('listening', () => {
+          const address = server.httpServer?.address();
+          const port = typeof address === 'object' && address ? address.port : 3000;
+
+          openExternalBrowser(`http://127.0.0.1:${port}/`);
+        });
+      },
+    };
+  }
 
   export default defineConfig({
-    plugins: [react()],
+    plugins: [react(), openExternalBrowserPlugin()],
     resolve: {
       extensions: ['.js', '.jsx', '.ts', '.tsx', '.json'],
       alias: {
@@ -54,7 +91,8 @@
       outDir: 'build',
     },
     server: {
+      host: '127.0.0.1',
       port: 3000,
-      open: true,
+      open: false,
     },
   });

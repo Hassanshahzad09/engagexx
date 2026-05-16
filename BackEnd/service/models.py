@@ -13,6 +13,25 @@ class User(AbstractUser):
     role = models.CharField(max_length=10, choices=ROLE_CHOICES)
     wallet_balance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
 
+class Transaction(models.Model):
+    TRANSACTION_TYPES = (
+        ('deposit', 'Deposit'),
+        ('escrow_in', 'Escrow In'),
+        ('escrow_release', 'Escrow Release'),
+        ('refund', 'Refund'),
+        ('penalty', 'Penalty'),
+        ('withdraw', 'Withdraw'),
+    )
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="transactions")
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    description = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.username} - {self.type} - {self.amount}"
+
 
 class BuyerProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
@@ -20,6 +39,7 @@ class BuyerProfile(models.Model):
 
 
 class SellerProfile(models.Model):
+    unethical_reports = models.IntegerField(default=0)
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     totalEarnings = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     ratings = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(5)])
@@ -53,6 +73,25 @@ class BuyerTasks(models.Model):
         return f"{self.title} - {self.platform}"
 
 
+class VirtualWallet(models.Model):
+    STATUS_CHOICES = (
+        ('holding', 'Holding'),
+        ('released', 'Released'),
+        ('refunded', 'Refunded'),
+    )
+
+    task = models.OneToOneField(BuyerTasks, on_delete=models.CASCADE, related_name="virtual_wallet")
+    buyer = models.ForeignKey(BuyerProfile, on_delete=models.CASCADE, related_name="escrow_payments")
+    seller = models.ForeignKey(SellerProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name="escrow_earnings")
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='holding')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Task {self.task.id} - {self.amount} - {self.status}"
+
+
 class JobsHistory(models.Model):
     seller = models.ForeignKey(SellerProfile, on_delete=models.CASCADE, related_name="jobs")
     task = models.ForeignKey(BuyerTasks, on_delete=models.CASCADE, related_name="jobs")
@@ -62,7 +101,10 @@ class JobsHistory(models.Model):
     startDate = models.DateTimeField(auto_now_add=True)
     endDate = models.DateTimeField(null=True, blank=True)
     completionTime = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    proofUrl = models.URLField(blank=True)
+    notes = models.TextField(blank=True)
     taskId = models.IntegerField(default=0)
+
 # current indexes of each rating seller
 
 class RatingIndexes(models.Model):
@@ -72,3 +114,35 @@ class RatingIndexes(models.Model):
     rate4 = models.IntegerField(default=-1)
     rate5 = models.IntegerField(default=-1)
 
+
+
+
+
+class SocialAccount(models.Model):
+   # user = models.ForeignKey(User, on_delete=models.CASCADE)
+    platform = models.CharField(max_length=20)
+    username = models.CharField(max_length=255)
+    social_id = models.CharField(max_length=255)
+    access_token = models.TextField()
+    sellerId = models.IntegerField(default=0)
+
+
+class SocialAuth(models.Model):
+    PROVIDER_CHOICES = (
+        ('google', 'Google'),
+        ('facebook', 'Facebook'),
+    )
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    provider = models.CharField(max_length=20)
+    provider_id = models.CharField(max_length=255)  # Google/Facebook unique ID
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+
+class TestAccount(models.Model):
+    user_id = models.CharField(max_length=100,unique = True)
+    created_at = models.DateTimeField(auto_now=True)
+    def __str__(self):
+        return self.user_id

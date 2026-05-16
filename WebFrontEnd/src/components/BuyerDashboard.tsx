@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Plus, Wallet, TrendingUp, Clock, CheckCircle, Facebook, Instagram, Youtube, Twitter, BarChart3, Filter, LogOut, Zap, AlertCircle } from 'lucide-react';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
@@ -10,10 +10,14 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, Di
 import { Badge } from './ui/badge';
 import { Progress } from './ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
-export default function BuyerDashboard({ onNavigate, onLogout }) {
+export default function BuyerDashboard({ onLogout }) {
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
+  const [isAddFundsOpen, setIsAddFundsOpen] = useState(false);
+  const [fundAmount, setFundAmount] = useState('');
+  const [paymentMethod, setPaymentMethod] = useState('jazzcash');
+  const [walletBalance, setWalletBalance] = useState(0);
   const [taskForm, setTaskForm] = useState({
     title: '',
     platform: '', 
@@ -32,9 +36,22 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
   });
 
   const location = useLocation();
+  const navigate = useNavigate();
   const user = location.state?.userData;
   const loggedInUserName = user?.userName || 'Buyer';
-
+  const estimatedCost = useMemo(() => {
+    const target = Number(taskForm.goal) || 0;
+    const price = Number(taskForm.pricePerAction) || 0;
+    return (target * price).toFixed(2);
+  }, [taskForm.goal, taskForm.pricePerAction]);
+  const handleLogout = () => {
+    if (typeof onLogout === 'function') {
+      onLogout();
+      return;
+    }
+    navigate('/');
+  };
+//console.log(user)
   useEffect(() => {
     if (!user?.userId) return;
 
@@ -58,11 +75,25 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
       }
     };
 
+    const fetchWalletBalance = async () => {
+      try {
+        const response = await fetch(`http://127.0.0.1:8000/api/wallet-balance/${user.userId}/`);
+        const data = await response.json();
+
+        if (response.ok) {
+          setWalletBalance(Number(data.walletBalance) || 0);
+        }
+      } catch (error) {
+        console.error('Wallet balance fetch error:', error);
+      }
+    };
+
     fetchDashboardStats();
+    fetchWalletBalance();
   }, [user]);
 
   const stats = [
-    { label: 'Wallet Balance', value: '$0.00', icon: Wallet, color: 'text-green-600', bg: 'bg-green-100' },
+    { label: 'Wallet Balance', value: `$${walletBalance.toFixed(2)}`, icon: Wallet, color: 'text-green-600', bg: 'bg-green-100' },
     { label: 'Active Tasks', value: dashboardStats.activeTasks, icon: Clock, color: 'text-blue-600', bg: 'bg-blue-100' },
     { label: 'Completed Tasks', value: dashboardStats.completedTasks, icon: CheckCircle, color: 'text-purple-600', bg: 'bg-purple-100' },
     { label: 'Platform Usage', value: dashboardStats.totalEngagement, icon: TrendingUp, color: 'text-orange-600', bg: 'bg-orange-100' },
@@ -128,6 +159,41 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
     }
   };
 
+  const handleAddFunds = async () => {
+    try {
+      const amount = Number(fundAmount);
+      if (!amount || amount <= 0) {
+        alert('Enter a valid amount');
+        return;
+      }
+
+      const response = await fetch('http://127.0.0.1:8000/api/add-funds/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.userId,
+          amount,
+          paymentMethod,
+          description: 'Buyer wallet top up',
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        setWalletBalance(Number(data.walletBalance) || 0);
+        setFundAmount('');
+        setIsAddFundsOpen(false);
+        alert(data.message || 'Funds added successfully');
+      } else {
+        alert(data.error || 'Add funds failed');
+      }
+    } catch (error) {
+      console.error(error);
+      alert('Server error');
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
@@ -141,10 +207,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
               <Badge className="ml-2 bg-blue-100 text-blue-700 hover:bg-blue-100">Buyer</Badge>
             </div>
             <div className="flex items-center gap-4">
-              <Button variant="ghost" size="sm" onClick={() => onNavigate('seller')}>
-                Switch to Seller
-              </Button>
-              <Button variant="ghost" size="sm" onClick={onLogout}>
+              <Button variant="ghost" size="sm" onClick={handleLogout}>
                 <LogOut className="w-4 h-4 mr-2" />
                 Logout
               </Button>
@@ -257,7 +320,9 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                             <AlertCircle className="w-5 h-5 text-green-600 mt-0.5" />
                             <div>
                               <p className="text-sm text-green-900 mb-1">Estimated Cost</p>
-                              <p className="text-green-700">$25.00 (500 actions x $0.05)</p>
+                              <p className="text-green-700">
+                                ${estimatedCost} ({taskForm.goal || 0} actions x ${taskForm.pricePerAction || 0})
+                              </p>
                             </div>
                           </div>
                         </div>
@@ -371,15 +436,64 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
           </div>
 
           <div className="space-y-6">
-            <Card className="border-gray-200 rounded-2xl">
+              <Card className="border-gray-200 rounded-2xl">
               <CardHeader>
                 <CardTitle className="text-gray-900">Quick Actions</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Button className="w-full justify-start bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full">
-                  <Wallet className="w-4 h-4 mr-2" />
-                  Add Funds
-                </Button>
+                <Dialog open={isAddFundsOpen} onOpenChange={setIsAddFundsOpen}>
+                  <DialogTrigger asChild>
+                    <Button className="w-full justify-start bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full">
+                      <Wallet className="w-4 h-4 mr-2" />
+                      Add Funds
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>Add Funds</DialogTitle>
+                      <DialogDescription>Top up your buyer wallet balance</DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 pt-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="fundAmount">Amount</Label>
+                      <Input
+                        id="fundAmount"
+                        type="number"
+                          step="0.01"
+                          min="1"
+                          placeholder="Enter amount"
+                        value={fundAmount}
+                        onChange={(e) => setFundAmount(e.target.value)}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="paymentMethod">Payment Method</Label>
+                      <Select value={paymentMethod} onValueChange={setPaymentMethod}>
+                        <SelectTrigger id="paymentMethod">
+                          <SelectValue placeholder="Choose payment method" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="jazzcash">JazzCash</SelectItem>
+                          <SelectItem value="easypaisa">Easypaisa</SelectItem>
+                          <SelectItem value="card">Debit/Credit Card</SelectItem>
+                          <SelectItem value="manual">Manual / Test Top Up</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                      <div className="flex gap-3 pt-2">
+                        <Button
+                          className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full"
+                          onClick={handleAddFunds}
+                        >
+                          Add Funds
+                        </Button>
+                        <Button variant="outline" className="flex-1 rounded-full" onClick={() => setIsAddFundsOpen(false)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
                 <Button variant="outline" className="w-full justify-start rounded-full">
                   <BarChart3 className="w-4 h-4 mr-2" />
                   View Analytics

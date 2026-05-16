@@ -33,14 +33,14 @@ export default function App() {
       case 'landing':
         return <LandingPage onNavigate={setCurrentPage} />;
       
-        case 'buyer':
-        return <BuyerDashboard onNavigate={setCurrentPage} onLogout={handleLogout} />;
+      case 'buyer':
+        return <BuyerDashboard onLogout={handleLogout} />;
       case 'seller':
-        return <SellerDashboard onNavigate={setCurrentPage} onLogout={handleLogout} />;
+        return <SellerDashboard onLogout={handleLogout} />;
       case 'admin':
         return <AdminDashboard onNavigate={setCurrentPage} onLogout={handleLogout} />;
       case 'login':
-        return <LoginSignup onLogin={handleLogin} onBack={() => setCurrentPage('landing')} />;
+        return <LoginSignup onLogin={handleLogin} onBack={() => setCurrentPage('landing')} onLogout={handleLogout} />;
       default:
         return <LandingPage onNavigate={setCurrentPage} />;
     }

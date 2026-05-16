@@ -1,14 +1,21 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 import pandas as pd
+from django.conf import settings
 from .models import JobAllocationModel
 
-# Load model once
-model = JobAllocationModel()
+model = None
 
-# Train model ONCE when server starts
-training_df = pd.read_excel("sellers_dataset_500.xlsx")
-model.train(training_df)
+
+def get_job_allocation_model():
+    global model
+
+    if model is None:
+        model = JobAllocationModel()
+        training_df = pd.read_excel(settings.BASE_DIR / "sellers_dataset_500.xlsx")
+        model.train(training_df)
+
+    return model
 
 
 @api_view(['POST'])
@@ -20,7 +27,7 @@ def allocate_jobs(request):
         if not sellers:
             return Response({"error": "No sellers data provided"})
 
-        result = model.predict_from_input(sellers, total_jobs)
+        result = get_job_allocation_model().predict_from_input(sellers, total_jobs)
 
         return Response({
             "status": "success",
