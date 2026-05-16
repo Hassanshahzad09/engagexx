@@ -9,6 +9,7 @@ urlpatterns = [
     path('transactions/<int:user_id>/', views.get_transactions, name="transactions"),
     path('create-task/', views.create_task, name="create-task"),
     path('buyer-dashboard-stats/<int:user_id>/', views.buyer_dashboard_stats, name="buyer-dashboard-stats"),
+    path('admin-dashboard-stats/', views.admin_dashboard_stats, name="admin-dashboard-stats"),
     path('admin-pending-tasks/', views.admin_pending_tasks, name="admin-pending-tasks"),
     path('admin-active-tasks/', views.admin_active_tasks, name="admin-active-tasks"),
     path('admin-dashboard-summary/', views.admin_dashboard_summary, name="admin-dashboard-summary"),
