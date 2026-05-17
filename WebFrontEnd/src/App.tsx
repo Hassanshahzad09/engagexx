@@ -9,7 +9,6 @@ import LoginSignup from './components/LoginSignup';
 export default function App() {
   const navigate = useNavigate();
   const location = useLocation();
-  const STORAGE_KEY = 'engageXUser';
 
   const getPageFromPath = (pathname) => {
     if (pathname === '/buyer-dashboard') return 'buyer';
@@ -33,89 +32,56 @@ export default function App() {
     return '/';
   };
 
-  const [currentPage, setCurrentPage] = useState(() => {
-    const savedUser = localStorage.getItem(STORAGE_KEY);
-
-    if (!savedUser) {
-      return getPageFromPath(window.location.pathname);
-    }
-
-    try {
-      return getPageFromUser(JSON.parse(savedUser));
-    } catch (error) {
-      localStorage.removeItem(STORAGE_KEY);
-      return getPageFromPath(window.location.pathname);
-    }
-  });
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [currentPage, setCurrentPage] = useState(() => getPageFromPath(window.location.pathname));
+  const [currentUser, setCurrentUser] = useState(location.state?.userData || null);
 
   const goToPage = (page) => {
     setCurrentPage(page);
-    navigate(getPathFromPage(page));
+    navigate(getPathFromPage(page), currentUser ? { state: { userData: currentUser } } : undefined);
   };
 
   useEffect(() => {
-    const savedUser = localStorage.getItem(STORAGE_KEY);
+    const routeUser = location.state?.userData || null;
+    const activeUser = routeUser || currentUser;
+    const requestedPage = getPageFromPath(location.pathname);
+    const isProtectedPage = requestedPage === 'buyer' || requestedPage === 'seller' || requestedPage === 'admin';
 
-    if (!savedUser) {
-      setIsLoggedIn(false);
-      setCurrentPage(getPageFromPath(location.pathname));
+    if (routeUser && routeUser !== currentUser) {
+      setCurrentUser(routeUser);
+    }
+
+    if (isProtectedPage && !activeUser) {
+      setCurrentPage('login');
+      navigate('/login', { replace: true });
       return;
     }
 
-    try {
-      const parsedUser = JSON.parse(savedUser);
-      setIsLoggedIn(true);
-      const allowedPage = getPageFromUser(parsedUser);
-      const requestedPage = getPageFromPath(location.pathname);
-
-      if (
-        requestedPage === 'buyer' ||
-        requestedPage === 'seller' ||
-        requestedPage === 'admin'
-      ) {
-        if (requestedPage !== allowedPage) {
-          setCurrentPage(allowedPage);
-          navigate(getPathFromPage(allowedPage), { replace: true });
-        } else {
-          setCurrentPage(requestedPage);
-        }
-      } else {
-        setCurrentPage(allowedPage);
-        navigate(getPathFromPage(allowedPage), { replace: true });
-      }
-    } catch (error) {
-      console.error('Session restore failed:', error);
-      localStorage.removeItem(STORAGE_KEY);
-      setIsLoggedIn(false);
-      setCurrentPage('landing');
-      navigate('/', { replace: true });
-    }
-  }, [location.pathname, navigate]);
+    setCurrentPage(requestedPage);
+  }, [location.pathname, location.state, currentUser, navigate]);
 
   const handleLogin = (userData) => {
-    setIsLoggedIn(true);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(userData));
-    goToPage(getPageFromUser(userData));
+    const page = getPageFromUser(userData);
+    setCurrentUser(userData);
+    setCurrentPage(page);
+    navigate(getPathFromPage(page), { replace: true, state: { userData } });
   };
 
   const handleLogout = () => {
-    setIsLoggedIn(false);
-    localStorage.removeItem(STORAGE_KEY);
-    goToPage('landing');
+    setCurrentUser(null);
+    setCurrentPage('landing');
+    navigate('/', { replace: true });
   };
 
   const renderPage = () => {
     switch (currentPage) {
       case 'landing':
         return <LandingPage onNavigate={goToPage} />;
-      
       case 'buyer':
-        return <BuyerDashboard onNavigate={goToPage} onLogout={handleLogout} />;
+        return <BuyerDashboard userData={currentUser} onNavigate={goToPage} onLogout={handleLogout} />;
       case 'seller':
-        return <SellerDashboard onNavigate={goToPage} onLogout={handleLogout} />;
+        return <SellerDashboard userData={currentUser} onNavigate={goToPage} onLogout={handleLogout} />;
       case 'admin':
-        return <AdminDashboard onNavigate={goToPage} onLogout={handleLogout} />;
+        return <AdminDashboard userData={currentUser} onNavigate={goToPage} onLogout={handleLogout} />;
       case 'login':
         return <LoginSignup onLogin={handleLogin} onBack={() => goToPage('landing')} />;
       default:

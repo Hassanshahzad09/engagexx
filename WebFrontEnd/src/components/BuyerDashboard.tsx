@@ -11,9 +11,10 @@ import { Badge } from './ui/badge';
 import { Progress } from './ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 
-export default function BuyerDashboard({ onNavigate, onLogout }) {
-  const STORAGE_KEY = 'engageXUser';
+export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
+  const [isAddFundsOpen, setIsAddFundsOpen] = useState(false);
+  const [fundAmount, setFundAmount] = useState('');
   const [taskForm, setTaskForm] = useState({
     title: '',
     platform: '', 
@@ -23,6 +24,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
     pricePerAction: '',
   });
   const [dashboardStats, setDashboardStats] = useState({
+    walletBalance: 0,
     activeTasks: 0,
     completedTasks: 0,
     allTasks: 0,
@@ -30,52 +32,39 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
     performance: 0,
     tasks: [],
   });
-  const [user, setUser] = useState(null);
+  const user = userData;
 
   const loggedInUserName = user?.userName || 'Buyer';
 
-  useEffect(() => {
-    const savedUser = localStorage.getItem(STORAGE_KEY);
-
-    if (!savedUser) {
-      return;
-    }
-
-    try {
-      setUser(JSON.parse(savedUser));
-    } catch (error) {
-      console.error('User session read failed:', error);
-    }
-  }, []);
-
-  useEffect(() => {
+  const fetchDashboardStats = async () => {
     if (!user?.userId) return;
 
-    const fetchDashboardStats = async () => {
-      try {
-        const response = await fetch(`http://127.0.0.1:8000/api/buyer-dashboard-stats/${user.userId}/`);
-        const data = await response.json();
+    try {
+      const response = await fetch(`http://127.0.0.1:8000/api/buyer-dashboard-stats/${user.userId}/`);
+      const data = await response.json();
 
-        if (response.ok) {
-          setDashboardStats({
-            activeTasks: data.activeTasks || 0,
-            completedTasks: data.completedTasks || 0,
-            allTasks: data.allTasks || 0,
-            totalEngagement: data.totalEngagement || 0,
-            performance: data.performance || 0,
-            tasks: data.tasks || [],
-          });
-        }
-      } catch (error) {
-        console.error('Dashboard stats error:', error);
+      if (response.ok) {
+        setDashboardStats({
+          walletBalance: Number(data.walletBalance) || 0,
+          activeTasks: data.activeTasks || 0,
+          completedTasks: data.completedTasks || 0,
+          allTasks: data.allTasks || 0,
+          totalEngagement: data.totalEngagement || 0,
+          performance: data.performance || 0,
+          tasks: data.tasks || [],
+        });
       }
-    };
+    } catch (error) {
+      console.error('Dashboard stats error:', error);
+    }
+  };
 
+  useEffect(() => {
     fetchDashboardStats();
-  }, [user]);
+  }, [user?.userId]);
 
   const stats = [
-    { label: 'Wallet Balance', value: '$0.00', icon: Wallet, color: 'text-green-600', bg: 'bg-green-100' },
+    { label: 'Wallet Balance', value: `$${dashboardStats.walletBalance.toFixed(2)}`, icon: Wallet, color: 'text-green-600', bg: 'bg-green-100' },
     { label: 'Active Tasks', value: dashboardStats.activeTasks, icon: Clock, color: 'text-blue-600', bg: 'bg-blue-100' },
     { label: 'Completed Tasks', value: dashboardStats.completedTasks, icon: CheckCircle, color: 'text-purple-600', bg: 'bg-purple-100' },
     { label: 'Platform Usage', value: dashboardStats.totalEngagement, icon: TrendingUp, color: 'text-orange-600', bg: 'bg-orange-100' },
@@ -111,6 +100,11 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
   };
 
   const handleCreateTask = async () => {
+    if (!user?.userId) {
+      alert('Please login again');
+      return;
+    }
+
     try {
       const response = await fetch('http://127.0.0.1:8000/api/create-task/', {
         method: 'POST',
@@ -131,7 +125,7 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
       if (response.ok) {
         alert(data.message);
         setIsCreateTaskOpen(false);
-        window.location.reload();
+        fetchDashboardStats();
       } else {
         alert(data.error || 'Task creation failed');
       }
@@ -141,9 +135,47 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
     }
   };
 
-  const handleLogoutClick = () => {
-    localStorage.removeItem(STORAGE_KEY);
+  const handleAddFunds = async () => {
+    if (!user?.userId) {
+      alert('Please login again');
+      return;
+    }
 
+    const amount = Number(fundAmount);
+    if (!amount || amount <= 0) {
+      alert('Enter a valid amount');
+      return;
+    }
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/add-funds/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user.userId,
+          amount,
+          paymentMethod: 'manual',
+          description: 'Buyer wallet top up',
+        }),
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        alert(data.message || 'Funds added successfully');
+        setFundAmount('');
+        setIsAddFundsOpen(false);
+        fetchDashboardStats();
+      } else {
+        alert(data.error || 'Add funds failed');
+      }
+    } catch (error) {
+      console.error(error);
+      alert('Server error');
+    }
+  };
+
+  const handleLogoutClick = () => {
     if (onLogout) {
       onLogout();
       return;
@@ -400,10 +432,42 @@ export default function BuyerDashboard({ onNavigate, onLogout }) {
                 <CardTitle className="text-gray-900">Quick Actions</CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
-                <Button className="w-full justify-start bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full">
-                  <Wallet className="w-4 h-4 mr-2" />
-                  Add Funds
-                </Button>
+                <Dialog open={isAddFundsOpen} onOpenChange={setIsAddFundsOpen}>
+                  <DialogTrigger asChild>
+                    <Button className="w-full justify-start bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full">
+                      <Wallet className="w-4 h-4 mr-2" />
+                      Add Funds
+                    </Button>
+                  </DialogTrigger>
+                  <DialogContent className="max-w-md">
+                    <DialogHeader>
+                      <DialogTitle>Add Funds</DialogTitle>
+                      <DialogDescription>Add money to your buyer wallet</DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-4 pt-4">
+                      <div>
+                        <Label htmlFor="fund-amount">Amount</Label>
+                        <Input
+                          id="fund-amount"
+                          type="number"
+                          min="1"
+                          step="0.01"
+                          placeholder="1000"
+                          value={fundAmount}
+                          onChange={(e) => setFundAmount(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex gap-3">
+                        <Button className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full" onClick={handleAddFunds}>
+                          Add Funds
+                        </Button>
+                        <Button variant="outline" className="flex-1 rounded-full" onClick={() => setIsAddFundsOpen(false)}>
+                          Cancel
+                        </Button>
+                      </div>
+                    </div>
+                  </DialogContent>
+                </Dialog>
                 <Button variant="outline" className="w-full justify-start rounded-full">
                   <BarChart3 className="w-4 h-4 mr-2" />
                   View Analytics

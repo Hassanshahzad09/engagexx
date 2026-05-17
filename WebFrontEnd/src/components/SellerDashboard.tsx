@@ -13,7 +13,7 @@ import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ConnectSocial from './ConnectSocial';
 
-export default function SellerDashboard({ onLogout }) {
+export default function SellerDashboard({ userData, onLogout }) {
   const [availableTasks, setAvailableTasks] = useState([]);
   const [activeTask, setActiveTask] = useState(null);
   const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
@@ -40,11 +40,11 @@ export default function SellerDashboard({ onLogout }) {
 
   const location = useLocation();
   const navigate = useNavigate();
-  const user = location.state?.userData;
+  const user = userData || location.state?.userData;
   const loggedInUserName = user?.userName || 'Seller';
  // console.log(user)
 
- const userId = user.userId;
+ const userId = user?.userId;
  //console.log(userId)
 
   const handleLogout = () => {
@@ -60,12 +60,12 @@ export default function SellerDashboard({ onLogout }) {
 
 //previous changes were here ,no userId + no dependency
 const fetchSellerData = async () => {
-  if (!user?.userId) return;
+  if (!userId) return;
 
   try {
     const [tasksResponse, statsResponse] = await Promise.all([
-      fetch(`http://127.0.0.1:8000/api/approved-tasks/?userId=${user.userId}`),
-      fetch(`http://127.0.0.1:8000/api/seller-dashboard-stats/${user.userId}/`),
+      fetch(`http://127.0.0.1:8000/api/approved-tasks/?userId=${userId}`),
+      fetch(`http://127.0.0.1:8000/api/seller-dashboard-stats/${userId}/`),
     ]);
 
     const tasksData = await tasksResponse.json();
@@ -93,7 +93,7 @@ const fetchSellerData = async () => {
 
 useEffect(() => {
   fetchSellerData();
-}, [user?.userId]);
+}, [userId]);
 
 
   useEffect(() => {
@@ -126,6 +126,10 @@ useEffect(() => {
 
   const handleSubmitTask = async () => {
   if (!activeTask?.id) return;
+  if (!userId) {
+    alert('Please login again');
+    return;
+  }
 
   try {
     const response = await fetch('http://127.0.0.1:8000/api/submit-task/', {
@@ -133,7 +137,7 @@ useEffect(() => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         taskId: activeTask.id,
-        sellerId: user.userId,
+        sellerId: userId,
         proofUrl,
         notes,
         timeSpent: timer,
@@ -160,6 +164,11 @@ useEffect(() => {
   }
 };
 const handleWithdrawFunds = async () => {
+  if (!userId) {
+    alert('Please login again');
+    return;
+  }
+
   const amount = Number(prompt('Enter withdraw amount'));
 
   if (!amount || amount <= 0) {
@@ -172,7 +181,7 @@ const handleWithdrawFunds = async () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        sellerId: user.userId,
+        sellerId: userId,
         amount,
       }),
     });

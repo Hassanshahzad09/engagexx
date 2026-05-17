@@ -2,5 +2,12 @@
   "workbench.externalBrowser": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
   "liveServer.settings.CustomBrowser": "chrome",
   "liveServer.settings.AdvanceCustomBrowserCmdLine": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "livePreview.openPreviewTarget": "External Browser"
+  "livePreview.openPreviewTarget": "External Browser",
+  "python.terminal.activateEnvironment": false,
+  "files.exclude": {
+    "BackEnd/.venv": true
+  },
+  "search.exclude": {
+    "BackEnd/.venv": true
+  }
 }

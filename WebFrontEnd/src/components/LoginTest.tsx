@@ -1,26 +1,12 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 
 const BASE_URL = "http://127.0.0.1:8000";
 
 const LoginPage = () => {
-  const [userId, setUserId]   = useState("");
+  const [userId, setUserId] = useState("");
   const [loggedIn, setLoggedIn] = useState(false);
   const [storedId, setStoredId] = useState("");
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState("");
-
-  // On page load — just read localStorage directly
-  useEffect(() => {
-    const savedId = localStorage.getItem("user_id");
-    const token   = localStorage.getItem("access_token");
-
-    if (savedId && token) {
-      setLoggedIn(true);
-      setStoredId(savedId);
-    }
-
-    setLoading(false);
-  }, []);
+  const [error, setError] = useState("");
 
   const handleLogin = async () => {
     if (!userId.trim()) {
@@ -38,9 +24,6 @@ const LoginPage = () => {
       const data = await response.json();
 
       if (response.ok) {
-        localStorage.setItem("access_token", data.access_token);
-        localStorage.setItem("user_id", data.user_id);
-
         setLoggedIn(true);
         setStoredId(data.user_id);
         setError("");
@@ -53,33 +36,21 @@ const LoginPage = () => {
   };
 
   const handleLogout = () => {
-    localStorage.removeItem("access_token");
-    localStorage.removeItem("user_id");
     setLoggedIn(false);
     setStoredId("");
     setUserId("");
   };
-
-  if (loading) {
-    return (
-      <div style={styles.wrapper}>
-        <p style={{ color: "#6b6b85" }}>Checking session...</p>
-      </div>
-    );
-  }
 
   return (
     <div style={styles.wrapper}>
       <div style={styles.card}>
         {loggedIn ? (
           <>
-            <div style={styles.successIcon}>✓</div>
+            <div style={styles.successIcon}>OK</div>
             <h2 style={styles.title}>Welcome Back!</h2>
             <p style={styles.subtitle}>You are logged in as</p>
             <div style={styles.userIdBadge}>{storedId}</div>
-            <p style={styles.hint}>
-              You will stay logged in until you logout or clear browser storage.
-            </p>
+            <p style={styles.hint}>You will stay logged in until you logout or refresh this test page.</p>
             <button onClick={handleLogout} style={styles.logoutButton}>
               Logout
             </button>
@@ -132,7 +103,7 @@ const styles: { [key: string]: React.CSSProperties } = {
     alignItems: "center",
     justifyContent: "center",
     margin: "0 auto 24px",
-    fontSize: "28px",
+    fontSize: "20px",
     color: "white",
   },
   title: {

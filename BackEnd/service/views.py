@@ -289,6 +289,11 @@ def buyer_dashboard_stats(request, user_id):
     if request.method != "GET":
         return JsonResponse({"error": "Only GET method allowed"}, status=405)
 
+    try:
+        buyer_user = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"error": "User not found"}, status=404)
+
     tasks = BuyerTasks.objects.filter(buyer__user__id=user_id)
     active_tasks = tasks.filter(approval_status="approved").exclude(status="completed").count()
     completed_tasks = tasks.filter(status="completed").count()
@@ -319,6 +324,7 @@ def buyer_dashboard_stats(request, user_id):
 
     return JsonResponse(
         {
+            "walletBalance": float(buyer_user.wallet_balance or 0),
             "activeTasks": active_tasks,
             "completedTasks": completed_tasks,
             "allTasks": all_tasks,
@@ -528,6 +534,7 @@ def approved_tasks(request):
         status="pending",
         seller=seller_profile,
         task__approval_status="approved",
+        task__virtual_wallet__status="holding",
     ).select_related("task")
 
     data = []
@@ -598,11 +605,22 @@ def submit_task(request):
             if virtual_wallet.status != "holding":
                 return JsonResponse({"error": "Task payment is not available"}, status=400)
 
+            remaining_actions = (task.goal or Decimal("0.00")) - (task.progressed or Decimal("0.00"))
+            if remaining_actions <= 0:
+                return JsonResponse({"error": "Task goal is already completed"}, status=400)
+
+            payment_amount = task.pricePerAction or Decimal("0.00")
+            if payment_amount <= 0:
+                return JsonResponse({"error": "Task price is not valid"}, status=400)
+
+            if virtual_wallet.amount < payment_amount:
+                return JsonResponse({"error": "Task payment wallet does not have enough balance"}, status=400)
+
             seller_user = seller_profile.user
-            seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) + virtual_wallet.amount
+            seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) + payment_amount
             seller_user.save(update_fields=["wallet_balance"])
 
-            seller_profile.totalEarnings = (seller_profile.totalEarnings or Decimal("0.00")) + virtual_wallet.amount
+            seller_profile.totalEarnings = (seller_profile.totalEarnings or Decimal("0.00")) + payment_amount
             seller_profile.avgCompletionTime = time_spent
             seller_profile.save(update_fields=["totalEarnings", "avgCompletionTime"])
 
@@ -610,8 +628,8 @@ def submit_task(request):
             job.notes = notes
             job.completionTime = time_spent
             job.status = "completed"
-            job.progress = task.goal
-            job.priceEarned = virtual_wallet.amount
+            job.progress = Decimal("1.00")
+            job.priceEarned = payment_amount
             job.endDate = timezone.now()
             job.save(update_fields=[
                 "proofUrl",
@@ -623,20 +641,26 @@ def submit_task(request):
                 "endDate",
             ])
 
-            virtual_wallet.status = "released"
-            virtual_wallet.seller = seller_profile
-            virtual_wallet.save(update_fields=["status", "seller", "updated_at"])
+            task.progressed = (task.progressed or Decimal("0.00")) + Decimal("1.00")
+            if task.progressed >= task.goal:
+                task.status = "completed"
+                task.endDate = timezone.now()
+            else:
+                task.status = "in_progress"
 
-            task.status = "completed"
-            task.progressed = task.goal
-            task.endDate = timezone.now()
             task.save(update_fields=["status", "progressed", "endDate"])
+
+            virtual_wallet.amount = virtual_wallet.amount - payment_amount
+            virtual_wallet.seller = seller_profile
+            if task.status == "completed" or virtual_wallet.amount <= 0:
+                virtual_wallet.status = "released"
+            virtual_wallet.save(update_fields=["amount", "status", "seller", "updated_at"])
 
             Transaction.objects.create(
                 user=seller_user,
-                amount=virtual_wallet.amount,
+                amount=payment_amount,
                 type="escrow_release",
-                description=f"Task completed: {task.title}",
+                description=f"Seller action completed: {task.title}",
             )
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
@@ -647,7 +671,7 @@ def submit_task(request):
     except VirtualWallet.DoesNotExist:
         return JsonResponse({"error": "Task payment wallet not found"}, status=404)
 
-    return JsonResponse({"message": "Task submitted successfully and payment released"}, status=200)
+    return JsonResponse({"message": "Task submitted successfully and one action payment released"}, status=200)
 
 
 def seller_dashboard_stats(request, user_id):
@@ -662,13 +686,14 @@ def seller_dashboard_stats(request, user_id):
     seller_user = seller_profile.user
     jobs = JobsHistory.objects.filter(seller=seller_profile).select_related("task")
     completed_jobs = jobs.filter(status="completed")
-    pending_jobs = jobs.filter(status="pending")
+    pending_jobs = jobs.filter(status="pending", task__virtual_wallet__status="holding")
     total_jobs = jobs.count()
     completed_count = completed_jobs.count()
     success_rate = round((completed_count / total_jobs) * 100, 2) if total_jobs else 0
 
     my_tasks = []
-    for job in jobs.order_by("-startDate")[:10]:
+    payable_jobs = (completed_jobs | pending_jobs).order_by("-startDate")[:10]
+    for job in payable_jobs:
         my_tasks.append({
             "id": job.id,
             "title": job.task.title,
