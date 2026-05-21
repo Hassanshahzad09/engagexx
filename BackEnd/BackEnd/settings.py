@@ -14,13 +14,14 @@ SECRET_KEY = 'django-insecure-kibq^_(ud^&h3nni_v6oqi-ff(hqz79f#c8ka+@%b!2*ae%_76
 
 DEBUG = True
 
-ALLOWED_HOSTS = ["127.0.0.1", "localhost","caddie-unlearned-author.ngrok-free.dev"]
+ALLOWED_HOSTS = ["127.0.0.1", "localhost","caddie-unlearned-author.ngrok-free.dev","preflight-museum-fence.ngrok-free.dev"]
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    
 ]
 
 CORS_ALLOW_ALL_ORIGINS = False
@@ -87,6 +88,7 @@ TEMPLATES = [
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "https://caddie-unlearned-author.ngrok-free.dev",
+    "https://preflight-museum-fence.ngrok-free.dev"
 ]
 
 WSGI_APPLICATION = 'BackEnd.wsgi.application'
@@ -148,11 +150,10 @@ YOUTUBE_CLIENT_ID = "553758333721-a0048757abn3s6kdosdr0sucr596kanh.apps.googleus
 YOUTUBE_CLIENT_SECRET = "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"
 
 
-FACEBOOK_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/facebook/callback/"
-INSTAGRAM_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/instagram/callback/"
-TWITTER_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/twitter/callback/"
-YOUTUBE_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/youtube/callback/"
-
+FACEBOOK_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/facebook/callback/"
+INSTAGRAM_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/instagram/callback/"
+TWITTER_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/twitter/callback/"
+YOUTUBE_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/youtube/callback/"
 
 
 
