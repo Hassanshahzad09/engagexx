@@ -225,7 +225,7 @@ export default function LoginSignup({ onLogin, onBack }) {
   return (
     <>
       {isLoading ? <Loader /> : (
-        <div className="min-h-screen bg-gradient-to-br from-green-50 via-white to-green-50/30 flex items-center justify-center p-3 sm:p-4 md:p-6 lg:p-8">
+        <div className="login-page min-h-screen bg-gradient-to-br from-green-50 via-white to-green-50/30 flex items-center justify-center p-3 sm:p-4 md:p-6 lg:p-8">
           <div className="w-full max-w-6xl grid lg:grid-cols-2 gap-6 lg:gap-8 items-center">
             <div className="hidden lg:block">
               <div className="mb-8">

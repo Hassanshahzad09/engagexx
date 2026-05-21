@@ -4,7 +4,6 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/
 import { ImageWithFallback } from './figma/ImageWithFallback';
 
 export default function LandingPage({ onNavigate }) {
-  console.log("hi")
   const howItWorks = [
     {
       icon: Target,
@@ -100,9 +99,9 @@ export default function LandingPage({ onNavigate }) {
   ];
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="landing-page min-h-screen bg-white">
       {/* Navigation */}
-      <nav className="border-b border-gray-100 sticky top-0 bg-white/95 backdrop-blur-sm z-50">
+      <nav className="landing-nav border-b border-gray-100 sticky top-0 bg-white/95 backdrop-blur-sm z-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center h-16">
             <div className="flex items-center gap-2">
@@ -139,11 +138,11 @@ export default function LandingPage({ onNavigate }) {
       </nav>
 
       {/* Hero Section */}
-      <section className="relative overflow-hidden bg-gradient-to-br from-green-50 via-white to-green-50/30">
+      <section className="landing-hero relative overflow-hidden bg-gradient-to-br from-green-50 via-white to-green-50/30">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20 lg:py-32">
           <div className="grid lg:grid-cols-2 gap-12 items-center">
             <div>
-              <div className="inline-flex items-center gap-2 bg-green-100 text-green-700 px-4 py-2 rounded-full mb-6">
+              <div className="landing-trust inline-flex items-center gap-2 bg-green-100 text-green-700 px-4 py-2 rounded-full mb-6">
                 <Shield className="w-4 h-4" />
                 <span className="text-sm">Trusted by 50,000+ users worldwide</span>
               </div>
@@ -194,7 +193,7 @@ export default function LandingPage({ onNavigate }) {
       </section>
 
       {/* How It Works */}
-      <section id="how-it-works" className="py-20 bg-white">
+      <section id="how-it-works" className="landing-section py-20 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-16">
             <h2 className="text-gray-900 mb-4">How It Works</h2>
@@ -222,7 +221,7 @@ export default function LandingPage({ onNavigate }) {
       </section>
 
       {/* Testimonials */}
-      <section id="testimonials" className="py-20 bg-gray-50">
+      <section id="testimonials" className="landing-section landing-muted-section py-20 bg-gray-50">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-16">
             <h2 className="text-gray-900 mb-4">What Our Users Say</h2>
@@ -259,7 +258,7 @@ export default function LandingPage({ onNavigate }) {
       </section>
 
       {/* Pricing */}
-      <section id="pricing" className="py-20 bg-white">
+      <section id="pricing" className="landing-section py-20 bg-white">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="text-center mb-16">
             <h2 className="text-gray-900 mb-4">Simple, Transparent Pricing</h2>
@@ -316,7 +315,7 @@ export default function LandingPage({ onNavigate }) {
       </section>
 
       {/* CTA Section */}
-      <section className="py-20 bg-gradient-to-br from-green-500 to-green-600">
+      <section className="landing-cta py-20 bg-gradient-to-br from-green-500 to-green-600">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
           <h2 className="text-white mb-6">Ready to Get Started?</h2>
           <p className="text-green-100 mb-8 max-w-2xl mx-auto text-lg">

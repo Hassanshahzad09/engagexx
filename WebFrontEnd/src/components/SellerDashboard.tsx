@@ -13,7 +13,7 @@ import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ConnectSocial from './ConnectSocial';
 
-export default function SellerDashboard({ userData, onLogout }) {
+export default function SellerDashboard({ userData, onLogout, theme = 'light' }) {
   const [availableTasks, setAvailableTasks] = useState([]);
   const [activeTask, setActiveTask] = useState(null);
   const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
@@ -94,6 +94,15 @@ const fetchSellerData = async () => {
 useEffect(() => {
   fetchSellerData();
 }, [userId]);
+
+useEffect(() => {
+  fetchSellerData();
+}, [
+  connectedPlatforms.facebook,
+  connectedPlatforms.instagram,
+  connectedPlatforms.twitter,
+  connectedPlatforms.youtube,
+]);
 
 
   useEffect(() => {
@@ -311,6 +320,7 @@ const myTasks = sellerStats.myTasks || [];
   connectedPlatforms={connectedPlatforms}
   setConnectedPlatforms={setConnectedPlatforms}
   sellerId = {userId}
+  theme={theme}
 />
         {/* Main Grid */}
         <div className="grid lg:grid-cols-3 gap-8">
@@ -409,7 +419,7 @@ const myTasks = sellerStats.myTasks || [];
           <div className="space-y-6">
 
             {/* Earnings */}
-            <Card className="border-gray-200 rounded-2xl bg-gradient-to-br from-green-500 to-green-600 text-white">
+            <Card className="seller-earnings-card border-gray-200 rounded-2xl bg-gradient-to-br from-green-500 to-green-600 text-white">
               <CardHeader>
                 <CardTitle className="text-white">Earnings Summary</CardTitle>
                 <CardDescription className="text-green-100">Available for withdrawal</CardDescription>
@@ -417,7 +427,7 @@ const myTasks = sellerStats.myTasks || [];
               <CardContent>
                <div className="text-white mb-6">${sellerStats.walletBalance.toFixed(2)}</div>
 <Button
-  className="w-full bg-white text-green-600 hover:bg-green-50 rounded-full"
+  className="seller-earnings-button w-full bg-white text-green-600 hover:bg-green-50 rounded-full"
   onClick={handleWithdrawFunds}
 >
   Withdraw Funds

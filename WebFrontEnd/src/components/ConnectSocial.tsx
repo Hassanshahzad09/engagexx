@@ -99,13 +99,16 @@ interface Props {
     }>
   >;
   sellerId: string | number;
+  theme?: string;
 }
 
 const ConnectSocial: React.FC<Props> = ({
   connectedPlatforms,
   setConnectedPlatforms,
   sellerId,
+  theme = "light",
 }) => {
+  const isDark = theme === "dark";
   const [connections, setConnections] = useState<Connections>({
     facebook: { connected: false, username: null },
     instagram: { connected: false, username: null },
@@ -250,27 +253,45 @@ const fetchConnections = async () => {
           const isConnected = connections[p.key].connected;
           const isHovered = hovered === p.key;
           const isPending = pending === p.key;
+          const unconnectedBg = isDark
+            ? isHovered
+              ? "#303132"
+              : "#242526"
+            : "#ffffff";
+          const unconnectedBorder = isDark
+            ? isHovered
+              ? p.accent
+              : "#3a3b3c"
+            : isHovered
+            ? p.accent
+            : "#e5e7eb";
+          const unconnectedText = isDark ? "#e4e6eb" : "#111827";
+          const unconnectedStatus = isDark ? "#b0b3b8" : "#6b7280";
+          const unconnectedIcon =
+            isDark && p.key === "twitter" ? "#e4e6eb" : p.accent;
 
           const cardStyle: React.CSSProperties = {
             ...styles.card,
-            background: isConnected ? (isHovered ? p.bgHover : p.bg) : "#ffffff",
+            background: isConnected ? (isHovered ? p.bgHover : p.bg) : unconnectedBg,
             border: isConnected
               ? "1px solid transparent"
-              : `1px solid ${isHovered ? p.accent : "#e5e7eb"}`,
-            color: isConnected ? "#ffffff" : "#111827",
+              : `1px solid ${unconnectedBorder}`,
+            color: isConnected ? "#ffffff" : unconnectedText,
             transform: isHovered && !isPending ? "translateY(-3px)" : "translateY(0)",
             boxShadow: isConnected
               ? isHovered
                 ? `0 14px 30px -10px ${p.accent}80`
                 : `0 8px 22px -10px ${p.accent}66`
               : isHovered
-              ? `0 8px 20px -10px ${p.accent}40`
+              ? `0 12px 26px -12px ${p.accent}80`
+              : isDark
+              ? "0 10px 24px rgba(0,0,0,0.24)"
               : "0 1px 2px rgba(0,0,0,0.04)",
             cursor: loading || isPending ? "wait" : "pointer",
             opacity: loading ? 0.6 : 1,
           };
 
-          const iconColor = isConnected ? "#ffffff" : p.accent;
+          const iconColor = isConnected ? "#ffffff" : unconnectedIcon;
           const statusText = loading
             ? "Checking..."
             : isPending
@@ -297,7 +318,7 @@ const fetchConnections = async () => {
               <span
                 style={{
                   ...styles.status,
-                  color: isConnected ? "rgba(255,255,255,0.92)" : "#6b7280",
+                  color: isConnected ? "rgba(255,255,255,0.92)" : unconnectedStatus,
                 }}
               >
                 {statusText}
@@ -313,11 +334,11 @@ const fetchConnections = async () => {
 const styles: { [key: string]: React.CSSProperties } = {
   wrapper: {
     width: "100%",
-    background: "#ffffff",
-    border: "1px solid #e5e7eb",
+    background: "var(--connect-panel-bg)",
+    border: "1px solid var(--connect-panel-border)",
     borderRadius: "16px",
     padding: "20px 22px 22px",
-    boxShadow: "0 1px 2px rgba(0,0,0,0.03)",
+    boxShadow: "var(--connect-panel-shadow)",
     fontFamily:
       "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Inter, Helvetica, Arial, sans-serif",
   },
@@ -327,12 +348,12 @@ const styles: { [key: string]: React.CSSProperties } = {
   title: {
     fontSize: "15px",
     fontWeight: 600,
-    color: "#1e3a8a",
+    color: "var(--connect-title)",
     letterSpacing: "0.1px",
   },
   subtitle: {
     fontSize: "13px",
-    color: "#6b7280",
+    color: "var(--connect-subtitle)",
     marginTop: "2px",
   },
   grid: {

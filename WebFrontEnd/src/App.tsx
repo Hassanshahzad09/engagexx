@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { Moon, Sun } from 'lucide-react';
 import LandingPage from './components/LandingPage';
 import BuyerDashboard from './components/BuyerDashboard';
 import SellerDashboard from './components/SellerDashboard';
@@ -34,6 +35,16 @@ export default function App() {
 
   const [currentPage, setCurrentPage] = useState(() => getPageFromPath(window.location.pathname));
   const [currentUser, setCurrentUser] = useState(location.state?.userData || null);
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((currentTheme) => (currentTheme === 'dark' ? 'light' : 'dark'));
+  };
 
   const goToPage = (page) => {
     setCurrentPage(page);
@@ -79,7 +90,7 @@ export default function App() {
       case 'buyer':
         return <BuyerDashboard userData={currentUser} onNavigate={goToPage} onLogout={handleLogout} />;
       case 'seller':
-        return <SellerDashboard userData={currentUser} onNavigate={goToPage} onLogout={handleLogout} />;
+        return <SellerDashboard userData={currentUser} onNavigate={goToPage} onLogout={handleLogout} theme={theme} />;
       case 'admin':
         return <AdminDashboard userData={currentUser} onNavigate={goToPage} onLogout={handleLogout} />;
       case 'login':
@@ -89,5 +100,18 @@ export default function App() {
     }
   };
 
-  return <div className="min-h-screen bg-white">{renderPage()}</div>;
+  return (
+    <div className="min-h-screen bg-white">
+      <button
+        type="button"
+        className="theme-toggle"
+        onClick={toggleTheme}
+        aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+      >
+        {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+        <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
+      </button>
+      {renderPage()}
+    </div>
+  );
 }

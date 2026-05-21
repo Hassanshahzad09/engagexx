@@ -517,6 +517,19 @@ def assign_task_to_available_sellers(task):
     return assigned_count
 
 
+def get_connected_platforms_for_seller(seller_profile):
+    seller_ids = {seller_profile.user_id, seller_profile.id}
+    platforms = SocialAccount.objects.filter(
+        sellerId__in=seller_ids
+    ).values_list("platform", flat=True)
+
+    return {
+        (platform or "").strip().lower()
+        for platform in platforms
+        if platform
+    }
+
+
 def approved_tasks(request):
     if request.method != "GET":
         return JsonResponse({"error": "Only GET method allowed"}, status=405)
@@ -530,6 +543,10 @@ def approved_tasks(request):
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
 
+    connected_platforms = get_connected_platforms_for_seller(seller_profile)
+    if not connected_platforms:
+        return JsonResponse({"tasks": []}, status=200)
+
     jobs = JobsHistory.objects.filter(
         status="pending",
         seller=seller_profile,
@@ -541,6 +558,10 @@ def approved_tasks(request):
 
     for job in jobs:
         task = job.task
+        platform = (task.platform or "").strip()
+        if platform.lower() not in connected_platforms:
+            continue
+
         goal = float(task.goal or 0)
         progressed = float(task.progressed or 0)
         price = float(task.pricePerAction or 0)
@@ -550,7 +571,7 @@ def approved_tasks(request):
             "id": task.id,
             "jobId": job.id,
             "title": task.title,
-            "platform": (task.platform or "").title(),
+            "platform": platform.title(),
             "type": (task.taskType or "").title(),
             "url": task.url,
             "price": price,
@@ -601,6 +622,14 @@ def submit_task(request):
                 seller=seller_profile,
                 status="pending",
             )
+            platform = (task.platform or "").strip().lower()
+            connected_platforms = get_connected_platforms_for_seller(seller_profile)
+
+            if platform not in connected_platforms:
+                return JsonResponse(
+                    {"error": f"Connect {task.platform} before submitting this task"},
+                    status=400,
+                )
 
             if virtual_wallet.status != "holding":
                 return JsonResponse({"error": "Task payment is not available"}, status=400)
