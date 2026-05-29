@@ -9,6 +9,7 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from BackEnd.utils import assign_jobs_round_robin
 from .models import BuyerProfile, BuyerTasks, RatingIndexes, SellerProfile, User,JobsHistory,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
+from .seller_rating import calculate_seller_rating, rating_dataset_summary, update_seller_rating
 from django.db import transaction
 from django.views.decorators.http import require_http_methods
 @csrf_exempt
@@ -385,13 +386,65 @@ def admin_active_tasks(request):
                 "pricePerAction": float(task.pricePerAction),
                 "url": task.url,
                 "status": task.status,
-                "assignedSellers": task.jobs.count(),
+                "assignedSellers": task.jobs.values("seller_id").distinct().count(),
                 "created": task.startDate.strftime("%Y-%m-%d %H:%M") if task.startDate else "",
             }
         )
 
     return JsonResponse({"tasks": data}, status=200)
 
+
+def admin_task_assigned_sellers(request, task_id):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    try:
+        task = BuyerTasks.objects.get(id=task_id)
+    except BuyerTasks.DoesNotExist:
+        return JsonResponse({"error": "Task not found"}, status=404)
+
+    jobs = (
+        JobsHistory.objects
+        .filter(task=task)
+        .select_related("seller__user")
+        .order_by("seller__user__username", "id")
+    )
+
+    sellers = []
+    seen_seller_ids = set()
+
+    for job in jobs:
+        seller = job.seller
+        if seller.id in seen_seller_ids:
+            continue
+        seen_seller_ids.add(seller.id)
+
+        seller_user = seller.user
+        rating_data = calculate_seller_rating(seller)
+
+        sellers.append({
+            "jobId": job.id,
+            "sellerId": seller.id,
+            "name": seller_user.get_full_name() or seller_user.username,
+            "email": seller_user.email,
+            "rating": rating_data["rating"],
+            "trustScore": rating_data["trust_score"],
+            "finalReputationScore": rating_data["final_reputation_score"],
+            "jobStatus": job.status,
+            "proofStatus": job.proofStatus,
+            "auditStatus": job.auditStatus,
+            "priceEarned": float(job.priceEarned or 0),
+        })
+
+    return JsonResponse({
+        "task": {
+            "id": task.id,
+            "title": task.title,
+            "platform": task.platform.title(),
+            "taskType": task.taskType.title(),
+        },
+        "sellers": sellers,
+    }, status=200)
 
 def admin_dashboard_summary(request):
     if request.method != "GET":
@@ -492,6 +545,108 @@ def admin_dashboard_summary(request):
         },
         status=200,
     )
+
+
+def build_job_fraud_analysis(job):
+    fraud_probability = 0
+    causes = []
+
+    if job.proofStatus == "invalid":
+        fraud_probability += 40
+        causes.append("Proof was marked invalid")
+
+    if job.auditStatus == "failed":
+        fraud_probability += 35
+        causes.append("Delayed audit failed")
+
+    if job.completionTime and job.completionTime > 0 and job.completionTime < Decimal("0.0167"):
+        fraud_probability += 15
+        causes.append("Task completed unusually fast")
+
+    if job.proofUrl:
+        duplicate_count = JobsHistory.objects.filter(proofUrl=job.proofUrl).exclude(id=job.id).count()
+        if duplicate_count > 0:
+            fraud_probability += 25
+            causes.append("Same proof URL used in another submission")
+
+    if job.seller.unethical_reports > 0:
+        fraud_probability += min(job.seller.unethical_reports * 10, 20)
+        causes.append("Seller has previous unethical reports")
+
+    fraud_probability = min(fraud_probability, 100)
+
+    if not causes:
+        causes.append("No strong fraud signals")
+
+    return {
+        "fraudProbability": fraud_probability,
+        "fraudCauses": causes,
+    }
+
+
+def admin_seller_monitor(request):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    sellers = SellerProfile.objects.select_related("user").prefetch_related("jobs__task").all()
+    seller_rows = []
+
+    for seller in sellers:
+        rating_data = calculate_seller_rating(seller)
+        seller_rows.append({
+            "id": seller.id,
+            "userId": seller.user.id,
+            "name": seller.user.get_full_name() or seller.user.username,
+            "email": seller.user.email,
+            "isOnline": seller.user.is_active,
+            "trustScore": rating_data["trust_score"],
+            "rating": rating_data["rating"],
+            "ratingLabel": rating_data["rating_label"],
+            "performanceScore": rating_data["performance_score"],
+            "finalReputationScore": rating_data["final_reputation_score"],
+            "successRate": rating_data["success_rate"],
+            "completedTasks": rating_data["completed_tasks"],
+            "validProofs": rating_data["valid_proofs"],
+            "invalidProofs": rating_data["invalid_proofs"],
+            "auditPassedTasks": rating_data["audit_passed_tasks"],
+            "auditFailedTasks": rating_data["audit_failed_tasks"],
+        })
+
+    proof_jobs = (
+        JobsHistory.objects
+        .exclude(proofUrl="")
+        .select_related("seller__user", "task")
+        .order_by("-endDate", "-startDate")[:100]
+    )
+
+    proof_rows = []
+    for job in proof_jobs:
+        rating_data = calculate_seller_rating(job.seller)
+        fraud_data = build_job_fraud_analysis(job)
+        proof_rows.append({
+            "jobId": job.id,
+            "sellerId": job.seller.id,
+            "sellerName": job.seller.user.get_full_name() or job.seller.user.username,
+            "sellerEmail": job.seller.user.email,
+            "taskTitle": job.task.title,
+            "platform": job.task.platform.title(),
+            "taskType": job.task.taskType.title(),
+            "proofUrl": job.proofUrl,
+            "proofStatus": job.proofStatus,
+            "auditStatus": job.auditStatus,
+            "submittedAt": job.endDate.strftime("%Y-%m-%d %H:%M") if job.endDate else "",
+            "completionTimeHours": float(job.completionTime or 0),
+            "trustScore": rating_data["trust_score"],
+            "rating": rating_data["rating"],
+            "ratingLabel": rating_data["rating_label"],
+            **fraud_data,
+        })
+
+    return JsonResponse({
+        "onlineSellers": [seller for seller in seller_rows if seller["isOnline"]],
+        "sellers": seller_rows,
+        "proofs": proof_rows,
+    }, status=200)
 
 
 def get_seller_profile_from_user_id(user_id):
@@ -599,7 +754,7 @@ def submit_task(request):
     seller_id = data.get("sellerId")
     proof_url = data.get("proofUrl", "")
     notes = data.get("notes", "")
-    time_spent = data.get("timeSpent", 0)
+    time_spent_seconds = data.get("timeSpent", 0)
 
     if not task_id or not seller_id:
         return JsonResponse({"error": "taskId and sellerId are required"}, status=400)
@@ -608,9 +763,14 @@ def submit_task(request):
         return JsonResponse({"error": "Proof URL is required"}, status=400)
 
     try:
-        time_spent = Decimal(str(time_spent))
+        time_spent_seconds = Decimal(str(time_spent_seconds))
     except (InvalidOperation, TypeError):
-        time_spent = Decimal("0.00")
+        time_spent_seconds = Decimal("0.00")
+
+    if time_spent_seconds < 0:
+        time_spent_seconds = Decimal("0.00")
+
+    time_spent = (time_spent_seconds / Decimal("3600.00")).quantize(Decimal("0.0001"))
 
     try:
         with transaction.atomic():
@@ -654,6 +814,8 @@ def submit_task(request):
             seller_profile.save(update_fields=["totalEarnings", "avgCompletionTime"])
 
             job.proofUrl = proof_url
+            job.proofStatus = "valid"
+            job.proofReviewedDate = timezone.now()
             job.notes = notes
             job.completionTime = time_spent
             job.status = "completed"
@@ -662,6 +824,8 @@ def submit_task(request):
             job.endDate = timezone.now()
             job.save(update_fields=[
                 "proofUrl",
+                "proofStatus",
+                "proofReviewedDate",
                 "notes",
                 "completionTime",
                 "status",
@@ -691,6 +855,8 @@ def submit_task(request):
                 type="escrow_release",
                 description=f"Seller action completed: {task.title}",
             )
+
+            rating_data = update_seller_rating(seller_profile)
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
     except BuyerTasks.DoesNotExist:
@@ -700,7 +866,10 @@ def submit_task(request):
     except VirtualWallet.DoesNotExist:
         return JsonResponse({"error": "Task payment wallet not found"}, status=404)
 
-    return JsonResponse({"message": "Task submitted successfully and one action payment released"}, status=200)
+    return JsonResponse({
+        "message": "Task submitted successfully and one action payment released",
+        "sellerRating": rating_data,
+    }, status=200)
 
 
 def seller_dashboard_stats(request, user_id):
@@ -733,6 +902,8 @@ def seller_dashboard_stats(request, user_id):
             "earnings": float(job.priceEarned or 0),
         })
 
+    rating_data = calculate_seller_rating(seller_profile)
+
     return JsonResponse({
         "walletBalance": float(seller_user.wallet_balance or 0),
         "totalEarnings": float(seller_profile.totalEarnings or 0),
@@ -740,7 +911,116 @@ def seller_dashboard_stats(request, user_id):
         "inProgress": pending_jobs.count(),
         "successRate": success_rate,
         "avgCompletionTime": float(seller_profile.avgCompletionTime or 0),
+        "rating": rating_data["rating"],
+        "ratingLabel": rating_data["rating_label"],
+        "performanceScore": rating_data["performance_score"],
+        "finalReputationScore": rating_data["final_reputation_score"],
+        "trustScore": rating_data["trust_score"],
         "myTasks": my_tasks,
+    }, status=200)
+
+
+def seller_rating_detail(request, user_id):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    try:
+        seller_profile = get_seller_profile_from_user_id(user_id)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
+
+    return JsonResponse(calculate_seller_rating(seller_profile), status=200)
+
+
+@csrf_exempt
+def refresh_seller_rating(request, user_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        seller_profile = get_seller_profile_from_user_id(user_id)
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
+
+    return JsonResponse(update_seller_rating(seller_profile), status=200)
+
+
+def seller_rating_dataset_summary(request):
+    if request.method != "GET":
+        return JsonResponse({"error": "Only GET method allowed"}, status=405)
+
+    return JsonResponse(rating_dataset_summary(), status=200)
+
+
+@csrf_exempt
+def review_seller_proof(request, job_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
+    proof_status = data.get("proofStatus")
+    if proof_status not in ["valid", "invalid"]:
+        return JsonResponse({"error": "proofStatus must be valid or invalid"}, status=400)
+
+    try:
+        with transaction.atomic():
+            job = JobsHistory.objects.select_for_update().select_related("seller").get(id=job_id)
+            job.proofStatus = proof_status
+            job.proofReviewedDate = timezone.now()
+            if proof_status == "invalid":
+                job.status = "rejected"
+            elif job.status == "rejected":
+                job.status = "completed"
+            job.save(update_fields=["proofStatus", "proofReviewedDate", "status"])
+            rating_data = update_seller_rating(job.seller)
+    except JobsHistory.DoesNotExist:
+        return JsonResponse({"error": "Job not found"}, status=404)
+
+    return JsonResponse({
+        "message": "Proof reviewed successfully",
+        "jobId": job.id,
+        "proofStatus": job.proofStatus,
+        "sellerRating": rating_data,
+    }, status=200)
+
+
+@csrf_exempt
+def review_seller_audit(request, job_id):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
+    audit_status = data.get("auditStatus")
+    if audit_status not in ["passed", "failed"]:
+        return JsonResponse({"error": "auditStatus must be passed or failed"}, status=400)
+
+    try:
+        with transaction.atomic():
+            job = JobsHistory.objects.select_for_update().select_related("seller").get(id=job_id)
+            job.auditStatus = audit_status
+            job.auditReviewedDate = timezone.now()
+            if audit_status == "failed":
+                job.status = "rejected"
+                job.seller.unethical_reports = (job.seller.unethical_reports or 0) + 1
+                job.seller.save(update_fields=["unethical_reports"])
+            job.save(update_fields=["auditStatus", "auditReviewedDate", "status"])
+            rating_data = update_seller_rating(job.seller)
+    except JobsHistory.DoesNotExist:
+        return JsonResponse({"error": "Job not found"}, status=404)
+
+    return JsonResponse({
+        "message": "Audit reviewed successfully",
+        "jobId": job.id,
+        "auditStatus": job.auditStatus,
+        "sellerRating": rating_data,
     }, status=200)
 
 
@@ -803,6 +1083,9 @@ def approve_task(request, task_id):
         with transaction.atomic():
             task = BuyerTasks.objects.select_for_update().get(id=task_id)
 
+            if task.approval_status == "approved":
+                return JsonResponse({"message": "Task already approved"}, status=200)
+
             if task.approval_status != "pending":
                 return JsonResponse({"error": "Task already reviewed"}, status=400)
 
@@ -840,8 +1123,6 @@ def approve_task(request, task_id):
             task.reviewed_date = timezone.now()
             task.save(update_fields=["approval_status", "status", "reviewed_date"])
 
-            if not JobsHistory.objects.filter(task=task, status="pending").exists():
-                assign_task_to_available_sellers(task)
     except BuyerTasks.DoesNotExist:
         return JsonResponse({"error": "Task not found"}, status=404)
 
@@ -1209,6 +1490,8 @@ def assign_jobs_api(request):
         task_id = body.get("taskId")
 
         task = BuyerTasks.objects.get(id=task_id)
+        if JobsHistory.objects.filter(task=task).exists():
+            return JsonResponse({"status": "Jobs already assigned for this task"}, status=200)
 
         # ✅ Step 1: Validate & normalize sellers
         valid_sellers = []
@@ -1257,6 +1540,7 @@ def assign_jobs_api(request):
                     print(f"No valid sellers in DB for {rating_key}")
                     continue
 
+                jobs_count = min(jobs_count, len(db_sellers))
                 last_index = getattr(tracker, rating_key)
 
                 assigned_ids, new_index = assign_jobs_round_robin(
@@ -1264,6 +1548,7 @@ def assign_jobs_api(request):
                     jobs_count,
                     last_index
                 )
+                assigned_ids = list(dict.fromkeys(assigned_ids))
 
                 print("---- DEBUG ----")
                 print("Rating:", rating_key)

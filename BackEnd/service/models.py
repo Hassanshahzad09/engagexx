@@ -93,6 +93,17 @@ class VirtualWallet(models.Model):
 
 
 class JobsHistory(models.Model):
+    PROOF_STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("valid", "Valid"),
+        ("invalid", "Invalid"),
+    )
+    AUDIT_STATUS_CHOICES = (
+        ("not_checked", "Not Checked"),
+        ("passed", "Passed"),
+        ("failed", "Failed"),
+    )
+
     seller = models.ForeignKey(SellerProfile, on_delete=models.CASCADE, related_name="jobs")
     task = models.ForeignKey(BuyerTasks, on_delete=models.CASCADE, related_name="jobs")
     progress = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -102,8 +113,17 @@ class JobsHistory(models.Model):
     endDate = models.DateTimeField(null=True, blank=True)
     completionTime = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     proofUrl = models.URLField(blank=True)
+    proofStatus = models.CharField(max_length=20, choices=PROOF_STATUS_CHOICES, default="pending")
+    proofReviewedDate = models.DateTimeField(null=True, blank=True)
+    auditStatus = models.CharField(max_length=20, choices=AUDIT_STATUS_CHOICES, default="not_checked")
+    auditReviewedDate = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True)
     taskId = models.IntegerField(default=0)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["seller", "task"], name="unique_seller_task_assignment"),
+        ]
 
 # current indexes of each rating seller
 
