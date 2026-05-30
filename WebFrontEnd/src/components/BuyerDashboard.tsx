@@ -15,6 +15,8 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(false);
   const [isAddFundsOpen, setIsAddFundsOpen] = useState(false);
   const [fundAmount, setFundAmount] = useState('');
+  const [fundMobile, setFundMobile] = useState('');
+  const [isFunding, setIsFunding] = useState(false);
   const [taskForm, setTaskForm] = useState({
     title: '',
     platform: '', 
@@ -147,6 +149,13 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
       return;
     }
 
+    if (!/^03\d{9}$/.test(fundMobile)) {
+      alert('Enter valid EasyPaisa number like 03xxxxxxxxx');
+      return;
+    }
+
+    setIsFunding(true);
+
     try {
       const response = await fetch('http://127.0.0.1:8000/api/add-funds/', {
         method: 'POST',
@@ -154,16 +163,19 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
         body: JSON.stringify({
           userId: user.userId,
           amount,
-          paymentMethod: 'manual',
-          description: 'Buyer wallet top up',
+          paymentMethod: 'easypaisa',
+          mobileNumber: fundMobile,
+          email: user.email,
+          description: 'Buyer EasyPaisa wallet top up',
         }),
       });
 
       const data = await response.json();
 
       if (response.ok) {
-        alert(data.message || 'Funds added successfully');
+        alert(`${data.message || 'Funds added successfully'}\nOrder ID: ${data.orderId || 'N/A'}`);
         setFundAmount('');
+        setFundMobile('');
         setIsAddFundsOpen(false);
         fetchDashboardStats();
       } else {
@@ -172,6 +184,8 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
     } catch (error) {
       console.error(error);
       alert('Server error');
+    } finally {
+      setIsFunding(false);
     }
   };
 
@@ -441,12 +455,23 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
                   </DialogTrigger>
                   <DialogContent className="max-w-md">
                     <DialogHeader>
-                      <DialogTitle>Add Funds</DialogTitle>
-                      <DialogDescription>Add money to your buyer wallet</DialogDescription>
+                      <DialogTitle>Add Funds via EasyPaisa</DialogTitle>
+                      <DialogDescription>Pay from your EasyPaisa wallet and add balance to EngageX</DialogDescription>
                     </DialogHeader>
                     <div className="space-y-4 pt-4">
                       <div>
-                        <Label htmlFor="fund-amount">Amount</Label>
+                        <Label htmlFor="fund-mobile">EasyPaisa Number</Label>
+                        <Input
+                          id="fund-mobile"
+                          inputMode="numeric"
+                          maxLength={11}
+                          placeholder="03xxxxxxxxx"
+                          value={fundMobile}
+                          onChange={(e) => setFundMobile(e.target.value.replace(/\D/g, '').slice(0, 11))}
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="fund-amount">Amount (PKR)</Label>
                         <Input
                           id="fund-amount"
                           type="number"
@@ -458,8 +483,8 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
                         />
                       </div>
                       <div className="flex gap-3">
-                        <Button className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full" onClick={handleAddFunds}>
-                          Add Funds
+                        <Button className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full" onClick={handleAddFunds} disabled={isFunding}>
+                          {isFunding ? 'Processing...' : 'Pay with EasyPaisa'}
                         </Button>
                         <Button variant="outline" className="flex-1 rounded-full" onClick={() => setIsAddFundsOpen(false)}>
                           Cancel

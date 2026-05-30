@@ -200,6 +200,11 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
   const [isTimerRunning, setIsTimerRunning] = useState(false);
   const [proofUrl, setProofUrl] = useState('');
   const [notes, setNotes] = useState('');
+  const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
+  const [withdrawAmount, setWithdrawAmount] = useState('');
+  const [withdrawMobile, setWithdrawMobile] = useState('');
+  const [withdrawAccountTitle, setWithdrawAccountTitle] = useState('');
+  const [isWithdrawing, setIsWithdrawing] = useState(false);
   const [sellerStats, setSellerStats] = useState({
     walletBalance: 0,
     totalEarnings: 0,
@@ -407,24 +412,45 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
   const handleWithdrawFunds = async () => {
     if (!userId) return;
 
-    const amount = Number(prompt('Enter withdraw amount'));
+    const amount = Number(withdrawAmount);
 
     if (!amount || amount <= 0) {
       alert('Enter a valid amount');
       return;
     }
 
+    if (!/^03\d{9}$/.test(withdrawMobile)) {
+      alert('Enter valid EasyPaisa number like 03xxxxxxxxx');
+      return;
+    }
+
+    if (!withdrawAccountTitle.trim()) {
+      alert('Enter EasyPaisa account title');
+      return;
+    }
+
+    setIsWithdrawing(true);
+
     try {
       const response = await fetch('http://127.0.0.1:8000/api/withdraw-funds/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sellerId: userId, amount }),
+        body: JSON.stringify({
+          sellerId: userId,
+          amount,
+          easypaisaNumber: withdrawMobile,
+          accountTitle: withdrawAccountTitle,
+        }),
       });
 
       const data = await response.json();
 
       if (response.ok) {
-        alert(data.message);
+        alert(`${data.message}\nReference: ${data.withdrawalReference || 'N/A'}`);
+        setWithdrawAmount('');
+        setWithdrawMobile('');
+        setWithdrawAccountTitle('');
+        setIsWithdrawOpen(false);
         fetchSellerData();
       } else {
         alert(data.error || 'Withdraw failed');
@@ -432,6 +458,8 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
     } catch (error) {
       console.error('Withdraw error:', error);
       alert('Server error');
+    } finally {
+      setIsWithdrawing(false);
     }
   };
 
@@ -624,7 +652,7 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
               </CardHeader>
               <CardContent>
                 <div className="text-white mb-6">${sellerStats.walletBalance.toFixed(2)}</div>
-                <Button className="seller-earnings-button w-full bg-white text-green-600 hover:bg-green-50 rounded-full" onClick={handleWithdrawFunds}>
+                <Button className="seller-earnings-button w-full bg-white text-green-600 hover:bg-green-50 rounded-full" onClick={() => setIsWithdrawOpen(true)}>
                   Withdraw Funds
                 </Button>
                 <div className="mt-6 pt-6 border-t border-green-400/30 space-y-3">
@@ -732,6 +760,67 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
           </div>
         </div>
       </div>
+
+      <Dialog open={isWithdrawOpen} onOpenChange={setIsWithdrawOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Withdraw via EasyPaisa</DialogTitle>
+            <DialogDescription>Send your available seller balance to your EasyPaisa account</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 pt-4">
+            <div className="rounded-xl border border-green-200 bg-green-50 p-4">
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-green-800">Available Balance</span>
+                <span className="font-semibold text-green-900">${sellerStats.walletBalance.toFixed(2)}</span>
+              </div>
+            </div>
+            <div>
+              <Label htmlFor="withdraw-mobile">EasyPaisa Number</Label>
+              <Input
+                id="withdraw-mobile"
+                inputMode="numeric"
+                maxLength={11}
+                placeholder="03xxxxxxxxx"
+                value={withdrawMobile}
+                onChange={(event) => setWithdrawMobile(event.target.value.replace(/\D/g, '').slice(0, 11))}
+              />
+            </div>
+            <div>
+              <Label htmlFor="withdraw-title">Account Title</Label>
+              <Input
+                id="withdraw-title"
+                placeholder="Account holder name"
+                value={withdrawAccountTitle}
+                onChange={(event) => setWithdrawAccountTitle(event.target.value)}
+              />
+            </div>
+            <div>
+              <Label htmlFor="withdraw-amount">Amount</Label>
+              <Input
+                id="withdraw-amount"
+                type="number"
+                min="1"
+                step="0.01"
+                placeholder="500"
+                value={withdrawAmount}
+                onChange={(event) => setWithdrawAmount(event.target.value)}
+              />
+            </div>
+            <div className="flex gap-3 pt-2">
+              <Button
+                className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full"
+                onClick={handleWithdrawFunds}
+                disabled={isWithdrawing}
+              >
+                {isWithdrawing ? 'Submitting...' : 'Submit Request'}
+              </Button>
+              <Button variant="outline" className="flex-1 rounded-full" onClick={() => setIsWithdrawOpen(false)}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={isTaskDialogOpen} onOpenChange={setIsTaskDialogOpen}>
         <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">

@@ -7,7 +7,26 @@ from django.conf import settings
 
 EXPECTED_TIME_HOURS = Decimal("4.00")
 DEFAULT_TRUST_SCORE = Decimal("50.00")
+DEFAULT_NEW_SELLER_RATING = 3
 DATASET_PATH = Path(settings.BASE_DIR) / "seller_rating_dataset.csv"
+ML_OUTPUT_DIR = Path(settings.BASE_DIR) / "ml_outputs"
+MODEL_PATH = ML_OUTPUT_DIR / "seller_rating_model.pkl"
+SCALER_PATH = ML_OUTPUT_DIR / "seller_scaler.pkl"
+FEATURE_COLUMNS = [
+    "TrustScore",
+    "SuccessRate",
+    "CompletionRatio",
+    "ProofValidityRate",
+    "SpeedScore",
+    "AuditRetentionRate",
+    "PerformanceScore",
+    "FinalReputationScore",
+    "AvgCompletionTime",
+    "AssignedTasks",
+    "CompletedTasks",
+    "ApprovedTasks",
+    "RejectedTasks",
+]
 
 
 def clamp_decimal(value, minimum=Decimal("0.00"), maximum=Decimal("100.00")):
@@ -40,6 +59,31 @@ def score_to_rating(final_reputation_score):
     return 1
 
 
+def predict_rating_with_ml_model(feature_values):
+    if not MODEL_PATH.exists() or not SCALER_PATH.exists():
+        return None
+
+    try:
+        import joblib
+        import numpy as np
+        from sklearn.preprocessing import LabelEncoder
+
+        model = joblib.load(MODEL_PATH)
+        scaler = joblib.load(SCALER_PATH)
+        input_array = np.array([[float(feature_values[column]) for column in FEATURE_COLUMNS]])
+        scaled_input = scaler.transform(input_array)
+        raw_prediction = model.predict(scaled_input)
+
+        if hasattr(model, "engagex_label_encoder_classes_"):
+            label_encoder = LabelEncoder()
+            label_encoder.classes_ = model.engagex_label_encoder_classes_
+            return int(label_encoder.inverse_transform(raw_prediction)[0])
+
+        return int(raw_prediction[0])
+    except Exception:
+        return None
+
+
 def calculate_rating_from_metrics(metrics):
     assigned_tasks = Decimal(str(metrics.get("AssignedTasks", 0) or 0))
     completed_tasks = Decimal(str(metrics.get("CompletedTasks", 0) or 0))
@@ -50,6 +94,32 @@ def calculate_rating_from_metrics(metrics):
 
     proof_validity_rate = metrics.get("ProofValidityRate")
     audit_retention_rate = metrics.get("AuditRetentionRate")
+
+    if assigned_tasks <= 0 or completed_tasks <= 0:
+        return {
+            "assigned_tasks": int(assigned_tasks),
+            "completed_tasks": int(completed_tasks),
+            "approved_tasks": int(approved_tasks),
+            "rejected_tasks": int(Decimal(str(metrics.get("RejectedTasks", 0) or 0))),
+            "submitted_proofs": int(submitted_proofs),
+            "valid_proofs": int(Decimal(str(metrics.get("ValidProofs", 0) or 0))),
+            "invalid_proofs": int(Decimal(str(metrics.get("InvalidProofs", 0) or 0))),
+            "audit_checked_tasks": int(Decimal(str(metrics.get("AuditCheckedTasks", 0) or 0))),
+            "audit_passed_tasks": int(Decimal(str(metrics.get("AuditPassedTasks", 0) or 0))),
+            "audit_failed_tasks": int(Decimal(str(metrics.get("AuditFailedTasks", 0) or 0))),
+            "avg_completion_time": float(round_decimal(avg_completion_time)),
+            "trust_score": float(round_decimal(DEFAULT_TRUST_SCORE)),
+            "success_rate": 0.0,
+            "completion_ratio": 0.0,
+            "proof_validity_rate": 0.0,
+            "speed_score": 0.0,
+            "audit_retention_rate": 0.0,
+            "performance_score": 0.0,
+            "final_reputation_score": float(round_decimal(DEFAULT_TRUST_SCORE)),
+            "rating": DEFAULT_NEW_SELLER_RATING,
+            "rating_label": f"{DEFAULT_NEW_SELLER_RATING} Star",
+            "rating_source": "new_seller_default",
+        }
 
     success_rate = safe_ratio(approved_tasks, completed_tasks)
     completion_ratio = safe_ratio(completed_tasks, assigned_tasks)
@@ -81,7 +151,23 @@ def calculate_rating_from_metrics(metrics):
         + Decimal("0.30") * trust_score
     )
     final_reputation_score = clamp_decimal(final_reputation_score)
-    rating = score_to_rating(final_reputation_score)
+    feature_values = {
+        "TrustScore": trust_score,
+        "SuccessRate": success_rate,
+        "CompletionRatio": completion_ratio,
+        "ProofValidityRate": proof_validity_rate,
+        "SpeedScore": speed_score,
+        "AuditRetentionRate": audit_retention_rate,
+        "PerformanceScore": performance_score,
+        "FinalReputationScore": final_reputation_score,
+        "AvgCompletionTime": avg_completion_time,
+        "AssignedTasks": assigned_tasks,
+        "CompletedTasks": completed_tasks,
+        "ApprovedTasks": approved_tasks,
+        "RejectedTasks": Decimal(str(metrics.get("RejectedTasks", 0) or 0)),
+    }
+    ml_rating = predict_rating_with_ml_model(feature_values)
+    rating = ml_rating or score_to_rating(final_reputation_score)
 
     return {
         "assigned_tasks": int(assigned_tasks),
@@ -105,6 +191,7 @@ def calculate_rating_from_metrics(metrics):
         "final_reputation_score": float(round_decimal(final_reputation_score)),
         "rating": rating,
         "rating_label": f"{rating} Star",
+        "rating_source": "ml_model" if ml_rating else "formula",
     }
 
 

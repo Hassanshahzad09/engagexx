@@ -1,6 +1,9 @@
 import json
+import base64
+import uuid
 from decimal import Decimal, InvalidOperation
 import requests
+from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
 from django.db.models import Count, Sum
 from django.db.models.functions import TruncMonth
@@ -8,10 +11,74 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from BackEnd.utils import assign_jobs_round_robin
-from .models import BuyerProfile, BuyerTasks, RatingIndexes, SellerProfile, User,JobsHistory,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
+from .models import BuyerProfile, BuyerTasks, EasypaisaTransaction, RatingIndexes, SellerProfile, SellerWithdrawalRequest, User,JobsHistory,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
 from .seller_rating import calculate_seller_rating, rating_dataset_summary, update_seller_rating
 from django.db import transaction
 from django.views.decorators.http import require_http_methods
+
+
+def get_easypaisa_credentials_header():
+    raw_credentials = f"{settings.EASYPAISA_USERNAME}:{settings.EASYPAISA_PASSWORD}"
+    encoded_credentials = base64.b64encode(raw_credentials.encode()).decode()
+    return {
+        "Credentials": encoded_credentials,
+        "Content-Type": "application/json",
+    }
+
+
+def generate_easypaisa_order_id():
+    return f"EP{uuid.uuid4().hex[:12].upper()}"
+
+
+def generate_withdrawal_reference():
+    return f"WD{uuid.uuid4().hex[:12].upper()}"
+
+
+def is_valid_easypaisa_mobile(value):
+    return bool(value) and value.isdigit() and len(value) == 11 and value.startswith("03")
+
+
+def get_easypaisa_error_message(code):
+    errors = {
+        "0001": "EasyPaisa system error. Please try again.",
+        "0002": "Required payment field is missing or incorrect.",
+        "0003": "Invalid EasyPaisa order ID.",
+        "0004": "Invalid merchant account number.",
+        "0005": "Merchant account is not active.",
+        "0006": "Invalid EasyPaisa store ID.",
+        "0007": "EasyPaisa store is not active.",
+        "0008": "EasyPaisa payment method is not enabled.",
+        "0010": "Invalid EasyPaisa credentials.",
+        "0013": "Low balance in EasyPaisa account.",
+        "0014": "EasyPaisa account does not exist.",
+        "0015": "Invalid token expiry.",
+        "0016": "Expiry date should be a future date.",
+    }
+    return errors.get(str(code or ""), "EasyPaisa payment failed. Please try again.")
+
+
+def initiate_easypaisa_ma_transaction(payload):
+    if settings.EASYPAISA_MOCK_PAYMENTS:
+        return {
+            "orderId": payload["orderId"],
+            "storeId": payload["storeId"],
+            "transactionId": f"MOCK{uuid.uuid4().hex[:8].upper()}",
+            "transactionDateTime": timezone.now().strftime("%d/%m/%Y %I:%M %p"),
+            "responseCode": "0000",
+            "responseDesc": "SUCCESS",
+        }
+
+    if not settings.EASYPAISA_USERNAME or not settings.EASYPAISA_PASSWORD:
+        raise ValueError("EasyPaisa credentials are missing")
+
+    response = requests.post(
+        settings.EASYPAISA_MA_URL,
+        json=payload,
+        headers=get_easypaisa_credentials_header(),
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
 @csrf_exempt
 def signup(request):
     if request.method != "POST":
@@ -157,7 +224,8 @@ def add_funds(request):
 
     user_id = data.get("userId")
     amount = data.get("amount")
-    payment_method = data.get("paymentMethod", "manual")
+    default_payment_method = "easypaisa" if request.path.endswith("/easypaisa-pay/") else "manual"
+    payment_method = data.get("paymentMethod", default_payment_method)
     description = data.get("description", "Wallet top up")
 
     if not user_id:
@@ -170,6 +238,101 @@ def add_funds(request):
 
     if amount <= 0:
         return JsonResponse({"error": "Amount must be greater than zero"}, status=400)
+
+    if str(payment_method).lower() == "easypaisa":
+        mobile_number = data.get("mobileNumber") or data.get("easypaisaAccount")
+
+        if not is_valid_easypaisa_mobile(str(mobile_number or "")):
+            return JsonResponse({"error": "Enter valid EasyPaisa number, for example 03xxxxxxxxx"}, status=400)
+
+        try:
+            user = User.objects.get(id=user_id)
+            buyer = BuyerProfile.objects.get(user=user)
+        except User.DoesNotExist:
+            return JsonResponse({"error": "User not found"}, status=404)
+        except BuyerProfile.DoesNotExist:
+            return JsonResponse({"error": "Buyer profile not found"}, status=404)
+
+        order_id = generate_easypaisa_order_id()
+        email = data.get("email") or user.email
+        payload = {
+            "orderId": order_id,
+            "storeId": settings.EASYPAISA_STORE_ID,
+            "transactionAmount": str(amount),
+            "transactionType": "MA",
+            "mobileAccountNo": mobile_number,
+            "emailAddress": email,
+        }
+        easypaisa_txn = EasypaisaTransaction.objects.create(
+            buyer=buyer,
+            order_id=order_id,
+            amount=amount,
+            mobile_number=mobile_number,
+            email=email,
+            status="pending",
+        )
+
+        try:
+            result = initiate_easypaisa_ma_transaction(payload)
+        except ValueError as error:
+            easypaisa_txn.status = "failed"
+            easypaisa_txn.response_desc = str(error)
+            easypaisa_txn.save(update_fields=["status", "response_desc", "updated_at"])
+            return JsonResponse({"error": str(error)}, status=500)
+        except requests.RequestException:
+            easypaisa_txn.status = "failed"
+            easypaisa_txn.response_desc = "EasyPaisa server not reachable"
+            easypaisa_txn.save(update_fields=["status", "response_desc", "updated_at"])
+            return JsonResponse({"error": "EasyPaisa server not reachable"}, status=500)
+
+        response_code = str(result.get("responseCode") or "")
+        response_desc = result.get("responseDesc") or ""
+        ep_txn_id = result.get("transactionId") or ""
+        easypaisa_txn.response_code = response_code
+        easypaisa_txn.response_desc = response_desc
+        easypaisa_txn.ep_txn_id = ep_txn_id
+
+        if response_code != "0000":
+            easypaisa_txn.status = "failed"
+            easypaisa_txn.save()
+            return JsonResponse(
+                {
+                    "error": get_easypaisa_error_message(response_code),
+                    "code": response_code,
+                    "responseDesc": response_desc,
+                },
+                status=400,
+            )
+
+        with transaction.atomic():
+            locked_user = User.objects.select_for_update().get(id=user.id)
+            locked_txn = EasypaisaTransaction.objects.select_for_update().get(id=easypaisa_txn.id)
+
+            if locked_txn.status == "pending":
+                locked_user.wallet_balance = (locked_user.wallet_balance or Decimal("0.00")) + amount
+                locked_user.save(update_fields=["wallet_balance"])
+                locked_txn.status = "success"
+                locked_txn.response_code = response_code
+                locked_txn.response_desc = response_desc
+                locked_txn.ep_txn_id = ep_txn_id
+                locked_txn.save()
+                Transaction.objects.create(
+                    user=locked_user,
+                    amount=amount,
+                    type="deposit",
+                    description=f"EasyPaisa wallet top up, order {order_id}",
+                )
+
+        return JsonResponse(
+            {
+                "message": "EasyPaisa payment successful. Wallet updated.",
+                "walletBalance": float(locked_user.wallet_balance),
+                "orderId": order_id,
+                "transactionId": ep_txn_id,
+                "mockPayment": settings.EASYPAISA_MOCK_PAYMENTS,
+            },
+            status=200,
+        )
 
     try:
         with transaction.atomic():
@@ -220,6 +383,90 @@ def get_transactions(request, user_id):
         )
 
     return JsonResponse({"transactions": data}, status=200)
+
+
+@csrf_exempt
+def easypaisa_inquire(request):
+    if request.method != "POST":
+        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
+    order_id = data.get("orderId")
+
+    if not order_id:
+        return JsonResponse({"error": "orderId is required"}, status=400)
+
+    try:
+        local_txn = EasypaisaTransaction.objects.select_related("buyer__user").get(order_id=order_id)
+    except EasypaisaTransaction.DoesNotExist:
+        return JsonResponse({"error": "EasyPaisa transaction not found"}, status=404)
+
+    if settings.EASYPAISA_MOCK_PAYMENTS:
+        result = {
+            "orderId": order_id,
+            "accountNum": settings.EASYPAISA_ACCOUNT_NUM,
+            "storeId": settings.EASYPAISA_STORE_ID,
+            "transactionStatus": "PAID" if local_txn.status == "success" else "PENDING",
+            "transactionAmount": str(local_txn.amount),
+            "responseCode": "0000",
+            "responseDesc": "SUCCESS",
+        }
+    else:
+        payload = {
+            "orderId": order_id,
+            "storeId": settings.EASYPAISA_STORE_ID,
+            "accountNum": settings.EASYPAISA_ACCOUNT_NUM,
+        }
+
+        try:
+            response = requests.post(
+                settings.EASYPAISA_INQUIRE_URL,
+                json=payload,
+                headers=get_easypaisa_credentials_header(),
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+        except requests.RequestException:
+            return JsonResponse({"error": "EasyPaisa server not reachable"}, status=500)
+
+    transaction_status = result.get("transactionStatus")
+    response_code = str(result.get("responseCode") or "")
+
+    if transaction_status == "PAID" and response_code == "0000":
+        with transaction.atomic():
+            locked_txn = EasypaisaTransaction.objects.select_for_update().select_related("buyer__user").get(order_id=order_id)
+            buyer_user = User.objects.select_for_update().get(id=locked_txn.buyer.user.id)
+
+            if locked_txn.status == "pending":
+                buyer_user.wallet_balance = (buyer_user.wallet_balance or Decimal("0.00")) + locked_txn.amount
+                buyer_user.save(update_fields=["wallet_balance"])
+                locked_txn.status = "success"
+                locked_txn.response_code = response_code
+                locked_txn.response_desc = result.get("responseDesc") or ""
+                locked_txn.save()
+                Transaction.objects.create(
+                    user=buyer_user,
+                    amount=locked_txn.amount,
+                    type="deposit",
+                    description=f"EasyPaisa wallet top up confirmed, order {order_id}",
+                )
+
+    return JsonResponse(
+        {
+            "orderId": order_id,
+            "transactionStatus": transaction_status,
+            "responseCode": response_code,
+            "responseDesc": result.get("responseDesc"),
+            "amount": result.get("transactionAmount"),
+            "dateTime": result.get("transactionDateTime"),
+        },
+        status=200,
+    )
 
 
 @csrf_exempt
@@ -1036,6 +1283,8 @@ def withdraw_funds(request):
 
     seller_id = data.get("sellerId")
     amount = data.get("amount")
+    easypaisa_number = data.get("easypaisaNumber") or data.get("mobileNumber")
+    account_title = data.get("accountTitle") or ""
 
     if not seller_id:
         return JsonResponse({"error": "sellerId is required"}, status=400)
@@ -1047,6 +1296,12 @@ def withdraw_funds(request):
 
     if amount <= 0:
         return JsonResponse({"error": "Amount must be greater than zero"}, status=400)
+
+    if not is_valid_easypaisa_mobile(str(easypaisa_number or "")):
+        return JsonResponse({"error": "Enter valid EasyPaisa number, for example 03xxxxxxxxx"}, status=400)
+
+    if not account_title.strip():
+        return JsonResponse({"error": "EasyPaisa account title is required"}, status=400)
 
     try:
         with transaction.atomic():
@@ -1063,14 +1318,24 @@ def withdraw_funds(request):
                 user=seller_user,
                 amount=amount,
                 type="withdraw",
-                description="Seller withdrawal request",
+                description=f"EasyPaisa withdrawal request to {easypaisa_number}",
+            )
+
+            withdrawal = SellerWithdrawalRequest.objects.create(
+                seller=seller_profile,
+                amount=amount,
+                easypaisa_number=easypaisa_number,
+                account_title=account_title.strip(),
+                reference=generate_withdrawal_reference(),
             )
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
 
     return JsonResponse({
-        "message": "Withdraw request completed",
+        "message": "EasyPaisa withdrawal request submitted",
         "walletBalance": float(seller_user.wallet_balance),
+        "withdrawalReference": withdrawal.reference,
+        "withdrawalStatus": withdrawal.status,
     }, status=200)
 
 
