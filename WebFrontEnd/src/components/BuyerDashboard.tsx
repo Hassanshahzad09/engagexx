@@ -149,10 +149,11 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
       return;
     }
 
-    if (!/^03\d{9}$/.test(fundMobile)) {
-      alert('Enter valid EasyPaisa number like 03xxxxxxxxx');
-      return;
-    }
+    // EasyPaisa integration is disabled during local testing.
+    // if (!/^03\d{9}$/.test(fundMobile)) {
+    //   alert('Enter valid EasyPaisa number like 03xxxxxxxxx');
+    //   return;
+    // }
 
     setIsFunding(true);
 
@@ -163,17 +164,19 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
         body: JSON.stringify({
           userId: user.userId,
           amount,
-          paymentMethod: 'easypaisa',
-          mobileNumber: fundMobile,
-          email: user.email,
-          description: 'Buyer EasyPaisa wallet top up',
+          // EasyPaisa integration is disabled during local testing.
+          // paymentMethod: 'easypaisa',
+          // mobileNumber: fundMobile,
+          // email: user.email,
+          paymentMethod: 'manual',
+          description: 'Buyer wallet top up',
         }),
       });
 
       const data = await response.json();
 
       if (response.ok) {
-        alert(`${data.message || 'Funds added successfully'}\nOrder ID: ${data.orderId || 'N/A'}`);
+        alert(data.message || 'Funds added successfully');
         setFundAmount('');
         setFundMobile('');
         setIsAddFundsOpen(false);
@@ -455,10 +458,11 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
                   </DialogTrigger>
                   <DialogContent className="max-w-md">
                     <DialogHeader>
-                      <DialogTitle>Add Funds via EasyPaisa</DialogTitle>
-                      <DialogDescription>Pay from your EasyPaisa wallet and add balance to EngageX</DialogDescription>
+                      <DialogTitle>Add Funds</DialogTitle>
+                      <DialogDescription>Add testing balance to your EngageX buyer wallet</DialogDescription>
                     </DialogHeader>
                     <div className="space-y-4 pt-4">
+                      {/* EasyPaisa integration is disabled during local testing.
                       <div>
                         <Label htmlFor="fund-mobile">EasyPaisa Number</Label>
                         <Input
@@ -470,6 +474,7 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
                           onChange={(e) => setFundMobile(e.target.value.replace(/\D/g, '').slice(0, 11))}
                         />
                       </div>
+                      */}
                       <div>
                         <Label htmlFor="fund-amount">Amount (PKR)</Label>
                         <Input
@@ -484,7 +489,7 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
                       </div>
                       <div className="flex gap-3">
                         <Button className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full" onClick={handleAddFunds} disabled={isFunding}>
-                          {isFunding ? 'Processing...' : 'Pay with EasyPaisa'}
+                          {isFunding ? 'Processing...' : 'Add Funds'}
                         </Button>
                         <Button variant="outline" className="flex-1 rounded-full" onClick={() => setIsAddFundsOpen(false)}>
                           Cancel

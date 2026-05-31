@@ -6,8 +6,9 @@ urlpatterns = [
     path('login/', views.login, name="login"),
     path('wallet-balance/<int:user_id>/', views.get_wallet_balance, name="wallet-balance"),
     path('add-funds/', views.add_funds, name="add-funds"),
-    path('easypaisa-pay/', views.add_funds, name="easypaisa-pay"),
-    path('easypaisa-inquire/', views.easypaisa_inquire, name="easypaisa-inquire"),
+    # EasyPaisa integration is disabled during local testing.
+    # path('easypaisa-pay/', views.add_funds, name="easypaisa-pay"),
+    # path('easypaisa-inquire/', views.easypaisa_inquire, name="easypaisa-inquire"),
     path('transactions/<int:user_id>/', views.get_transactions, name="transactions"),
     path('create-task/', views.create_task, name="create-task"),
     path('buyer-dashboard-stats/<int:user_id>/', views.buyer_dashboard_stats, name="buyer-dashboard-stats"),

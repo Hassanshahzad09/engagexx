@@ -242,7 +242,9 @@ def add_funds(request):
 
     user_id = data.get("userId")
     amount = data.get("amount")
-    default_payment_method = "easypaisa" if request.path.endswith("/easypaisa-pay/") else "manual"
+    # EasyPaisa integration is disabled during local testing.
+    # default_payment_method = "easypaisa" if request.path.endswith("/easypaisa-pay/") else "manual"
+    default_payment_method = "manual"
     payment_method = data.get("paymentMethod", default_payment_method)
     description = data.get("description", "Wallet top up")
 
@@ -257,7 +259,9 @@ def add_funds(request):
     if amount <= 0:
         return JsonResponse({"error": "Amount must be greater than zero"}, status=400)
 
-    if str(payment_method).lower() == "easypaisa":
+    # EasyPaisa integration is disabled during local testing.
+    # if str(payment_method).lower() == "easypaisa":
+    if False and str(payment_method).lower() == "easypaisa":
         mobile_number = data.get("mobileNumber") or data.get("easypaisaAccount")
 
         if not is_valid_easypaisa_mobile(str(mobile_number or "")):
