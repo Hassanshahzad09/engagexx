@@ -120,13 +120,13 @@ const ConnectSocial: React.FC<Props> = ({
   const [hovered, setHovered] = useState<Platform | null>(null);
 
   useEffect(() => {
-    const interval = setInterval(() => {
+    /*const interval = setInterval(() => {
     fetchConnections();
   }, 3000);
 
   return () => clearInterval(interval);
-
-//    fetchConnections();
+*/
+    fetchConnections();
   }, []);
 
   /*

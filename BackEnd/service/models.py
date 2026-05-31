@@ -163,11 +163,20 @@ class JobsHistory(models.Model):
     auditReviewedDate = models.DateTimeField(null=True, blank=True)
     notes = models.TextField(blank=True)
     taskId = models.IntegerField(default=0)
+    proofImage = models.ImageField(
+    upload_to="proof_screenshots/",
+    blank=True,
+    null=True
+)
+
+    proofSha256 = models.CharField(
+    max_length=64,
+    blank=True,
+    db_index=True
+)
 
     class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["seller", "task"], name="unique_seller_task_assignment"),
-        ]
+        pass
 
 
 class SellerBehaviorLog(models.Model):

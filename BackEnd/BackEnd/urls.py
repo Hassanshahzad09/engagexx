@@ -7,5 +7,6 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('service.urls')),
     path('ml/', include('mlservice.urls')),
-    path('oauth/',include('social_auth.urls'))
+    path('oauth/',include('social_auth.urls')),
+    path('fraud/',include('detectfraud.urls'))
 ]

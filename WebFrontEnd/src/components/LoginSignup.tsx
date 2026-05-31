@@ -62,7 +62,7 @@ export default function LoginSignup({ onLogin, onBack }) {
                 role: data.role,
                 isAdmin: data.isAdmin,
               };
-
+              console.log(user.userId)
               onLogin(user);
             } else if (response.status === 400) {
               alert(data.error);

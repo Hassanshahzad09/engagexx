@@ -16,7 +16,6 @@ from django.shortcuts import redirect
 from django.conf import settings
 from service.models import SocialAccount,User,BuyerProfile,SellerProfile,SocialAuth
 
-
 def connect_facebook(request):
     base_url = "https://www.facebook.com/v18.0/dialog/oauth"
     seller_id = request.GET.get('seller_id')
@@ -36,10 +35,20 @@ def connect_facebook(request):
 
 def facebook_callback(request):
     code = request.GET.get("code")
+
+    if not code:
+        return HttpResponse("No code received from Facebook")
+
+    # Decode state
     state = request.GET.get('state')
-    data = json.loads(base64.b64decode(state).decode())
-    seller_id = data.get('seller_id')
-    # 1. Exchange code for token
+
+    try:
+        data = json.loads(base64.b64decode(state).decode())
+        seller_id = data.get('seller_id')
+    except Exception as e:
+        return HttpResponse(f"Invalid state: {str(e)}")
+
+    # Exchange code for token
     token_url = "https://graph.facebook.com/v18.0/oauth/access_token"
 
     token_response = requests.get(token_url, params={
@@ -47,11 +56,16 @@ def facebook_callback(request):
         "client_secret": settings.FACEBOOK_CLIENT_SECRET,
         "redirect_uri": settings.FACEBOOK_REDIRECT_URI,
         "code": code,
-    })
+    }).json()
 
-    access_token = token_response.json().get("access_token")
+    print("TOKEN RESPONSE:", token_response)
 
-    # 2. Get user info
+    access_token = token_response.get("access_token")
+
+    if not access_token:
+        return HttpResponse("Failed to get access token")
+
+    # Get Facebook user info
     user_info = requests.get(
         "https://graph.facebook.com/me",
         params={
@@ -60,19 +74,24 @@ def facebook_callback(request):
         }
     ).json()
 
-    # 3. Save data
-    print(user_info.get("name"),user_info.get("id"))
+    print("USER INFO:", user_info)
+
+    username = user_info.get("name")
+    social_id = user_info.get("id")
+
+    if not username or not social_id:
+        return HttpResponse("Facebook did not return complete user data")
+
+    # Save account
     SocialAccount.objects.create(
-        #user=request.user,
         platform="facebook",
-        username=user_info.get("name"),
-        social_id=user_info.get("id"),
+        username=username,
+        social_id=social_id,
         access_token=access_token,
         sellerId=seller_id
     )
 
     return redirect("http://localhost:3000/connect-facebook")
-
 
 
 

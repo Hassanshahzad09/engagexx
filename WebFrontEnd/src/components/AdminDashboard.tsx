@@ -150,12 +150,12 @@ export default function AdminDashboard({ onLogout }) {
     return [];
   };
 
-  const fetchJobs = async (sellersObj) => {
+  const fetchJobs = async (sellersObj, goal) => {
     try {
       const response = await fetch(`${API_BASE_URL}/ml/allocate-jobs/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ total_jobs: 20, sellers: sellersObj }),
+        body: JSON.stringify({ total_jobs: goal, sellers: sellersObj }),
       });
       const data = await response.json();
       if (response.ok) {
@@ -208,9 +208,10 @@ export default function AdminDashboard({ onLogout }) {
         alert(data.error || 'Approve failed');
         return;
       }
-
+      const goal = data.goal || 0;
+      console.log(goal)
       const sellersObj = await fetchSellers();
-      const allocation = await fetchJobs(sellersObj);
+      const allocation = await fetchJobs(sellersObj,goal);
       await assignJobsToSellers(taskId, sellersObj, allocation);
       alert(data.message);
       refreshAdminData();

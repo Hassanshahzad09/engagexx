@@ -1008,16 +1008,36 @@ def approved_tasks(request):
 
     return JsonResponse({"tasks": data}, status=200)
 
+import hashlib
+
+def calculate_file_sha256(uploaded_file):
+    sha256 = hashlib.sha256()
+
+    for chunk in uploaded_file.chunks():
+        sha256.update(chunk)
+
+    uploaded_file.seek(0)
+
+    return sha256.hexdigest()
+
 
 @csrf_exempt
 def submit_task(request):
-    if request.method != "POST":
-        return JsonResponse({"error": "Only POST method allowed"}, status=405)
+    proof_image = None
+    content_type = request.content_type or ""
 
-    try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "Invalid JSON format"}, status=400)
+    if content_type.startswith("multipart/form-data"):
+        data = request.POST
+        proof_image = request.FILES.get("proofImage")
+
+    elif content_type.startswith("application/json"):
+        try:
+            data = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return JsonResponse({"error": "Invalid JSON format"}, status=400)
+
+    else:
+        return JsonResponse({"error": "Unsupported content type"}, status=400)
 
     task_id = data.get("taskId")
     seller_id = data.get("sellerId")
@@ -1025,11 +1045,16 @@ def submit_task(request):
     notes = data.get("notes", "")
     time_spent_seconds = data.get("timeSpent", 0)
 
+    proof_sha256 = ""
+
+    if proof_image:
+        proof_sha256 = calculate_file_sha256(proof_image)
+
     if not task_id or not seller_id:
         return JsonResponse({"error": "taskId and sellerId are required"}, status=400)
 
-    if not proof_url:
-        return JsonResponse({"error": "Proof URL is required"}, status=400)
+    if not proof_url and not proof_image:
+        return JsonResponse({"error": "Proof URL or screenshot image is required"}, status=400)
 
     try:
         time_spent_seconds = Decimal(str(time_spent_seconds))
@@ -1046,11 +1071,23 @@ def submit_task(request):
             seller_profile = get_seller_profile_from_user_id(seller_id)
             task = BuyerTasks.objects.select_for_update().get(id=task_id)
             virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
-            job = JobsHistory.objects.select_for_update().get(
-                task=task,
-                seller=seller_profile,
-                status="pending",
-            )
+            job = (
+        JobsHistory.objects
+        .select_for_update()
+        .filter(
+            task=task,
+            seller=seller_profile,
+            status="pending",
+        )
+        .order_by("startDate")
+        .first()
+)
+
+            if not job:
+                return JsonResponse(
+            {"error": "This task is not assigned to this seller"},
+            status=400
+        )
             platform = (task.platform or "").strip().lower()
             connected_platforms = get_connected_platforms_for_seller(seller_profile)
 
@@ -1083,6 +1120,8 @@ def submit_task(request):
             seller_profile.save(update_fields=["totalEarnings", "avgCompletionTime"])
 
             job.proofUrl = proof_url
+            job.proofImage = proof_image
+            job.proofSha256 = proof_sha256
             job.proofStatus = "valid"
             job.proofReviewedDate = timezone.now()
             job.notes = notes
@@ -1092,16 +1131,18 @@ def submit_task(request):
             job.priceEarned = payment_amount
             job.endDate = timezone.now()
             job.save(update_fields=[
-                "proofUrl",
-                "proofStatus",
-                "proofReviewedDate",
-                "notes",
-                "completionTime",
-                "status",
-                "progress",
-                "priceEarned",
-                "endDate",
-            ])
+    "proofUrl",
+    "proofImage",
+    "proofSha256",
+    "proofStatus",
+    "proofReviewedDate",
+    "notes",
+    "completionTime",
+    "status",
+    "progress",
+    "priceEarned",
+    "endDate",
+])
 
             task.progressed = (task.progressed or Decimal("0.00")) + Decimal("1.00")
             if task.progressed >= task.goal:

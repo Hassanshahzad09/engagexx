@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'mlservice',
     'social_auth',
     'rest_framework',
+    'detectfraud',
  
 ]
 
@@ -108,7 +109,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.mysql',
         'NAME': 'engageX',
         'USER': 'root',
-        'PASSWORD': 'Affaqahmad12345#',
+        'PASSWORD': 'horserider12',
         'HOST': '127.0.0.1',
         'PORT': '3306',
     }
@@ -148,6 +149,7 @@ SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SAMESITE = 'Lax'
 
+
 EASYPAISA_STORE_ID = os.getenv("EASYPAISA_STORE_ID", "43")
 EASYPAISA_USERNAME = os.getenv("EASYPAISA_USERNAME", "")
 EASYPAISA_PASSWORD = os.getenv("EASYPAISA_PASSWORD", "")
@@ -174,10 +176,10 @@ YOUTUBE_CLIENT_ID = "553758333721-a0048757abn3s6kdosdr0sucr596kanh.apps.googleus
 YOUTUBE_CLIENT_SECRET = "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"
 
 
-FACEBOOK_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/facebook/callback/"
-INSTAGRAM_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/instagram/callback/"
-TWITTER_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/twitter/callback/"
-YOUTUBE_REDIRECT_URI = "https://preflight-museum-fence.ngrok-free.dev/oauth/youtube/callback/"
+FACEBOOK_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/facebook/callback/"
+INSTAGRAM_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/instagram/callback/"
+TWITTER_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/twitter/callback/"
+YOUTUBE_REDIRECT_URI = "https://caddie-unlearned-author.ngrok-free.dev/oauth/youtube/callback/"
 
 
 
@@ -189,3 +191,8 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
 }
+
+import os
+
+MEDIA_URL = "/media/"
+MEDIA_ROOT = os.path.join(BASE_DIR, "media")

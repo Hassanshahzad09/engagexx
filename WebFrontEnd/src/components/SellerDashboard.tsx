@@ -10,9 +10,14 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { useState, useEffect, useRef } from 'react';
-import type { MouseEvent } from 'react';
+import type { ChangeEvent, MouseEvent } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ConnectSocial from './ConnectSocial';
+
+
+const SUBMIT_TASK_API_URL = 'http://127.0.0.1:8000/api/submit-task/';
+const MAX_PROOF_IMAGE_SIZE_MB = 5;
+const MAX_PROOF_IMAGE_SIZE_BYTES = MAX_PROOF_IMAGE_SIZE_MB * 1024 * 1024;
 
 interface YouTubeDrawerProps {
   videoUrl: string;
@@ -198,7 +203,8 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
   const [isTaskDialogOpen, setIsTaskDialogOpen] = useState(false);
   const [timer, setTimer] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(false);
-  const [proofUrl, setProofUrl] = useState('');
+  const [proofImage, setProofImage] = useState<File | null>(null);
+  const [isSubmittingTask, setIsSubmittingTask] = useState(false);
   const [notes, setNotes] = useState('');
   const [isWithdrawOpen, setIsWithdrawOpen] = useState(false);
   const [withdrawAmount, setWithdrawAmount] = useState('');
@@ -233,6 +239,36 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
   const user = userData || location.state?.userData;
   const loggedInUserName = user?.userName || 'Seller';
   const userId = user?.userId;
+
+
+  const resetProofFields = () => {
+    setProofImage(null);
+    setNotes('');
+  };
+
+  const handleProofImageChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = event.target.files?.[0];
+
+    if (!selectedFile) return;
+
+    if (!selectedFile.type.startsWith('image/')) {
+      alert('Please upload only an image file.');
+      event.target.value = '';
+      return;
+    }
+
+    if (selectedFile.size > MAX_PROOF_IMAGE_SIZE_BYTES) {
+      alert(`Image size must be less than ${MAX_PROOF_IMAGE_SIZE_MB}MB.`);
+      event.target.value = '';
+      return;
+    }
+
+    setProofImage(selectedFile);
+  };
+
+  const removeProofImage = () => {
+    setProofImage(null);
+  };
 
   const fetchSellerData = async () => {
     if (!userId) return;
@@ -325,8 +361,7 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
     setIsTaskDialogOpen(true);
     setTimer(0);
     setIsTimerRunning(true);
-    setProofUrl('');
-    setNotes('');
+    resetProofFields();
 
     const platformUrl = getPlatformUrl(task);
     if (platformUrl) {
@@ -338,7 +373,7 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
     if (!youTubeTaskData) return;
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/submit-task/', {
+      const response = await fetch(SUBMIT_TASK_API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -376,17 +411,28 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
       return;
     }
 
+    if (!proofImage) {
+      alert('Please upload proof screenshot.');
+      return;
+    }
+
+    setIsSubmittingTask(true);
+
+    const formData = new FormData();
+    formData.append('taskId', String(activeTask.id));
+    formData.append('sellerId', String(userId));
+    formData.append('proofUrl', '');
+    formData.append('notes', notes.trim());
+    formData.append('timeSpent', String(timer));
+
+    if (proofImage) {
+      formData.append('proofImage', proofImage);
+    }
+
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/submit-task/', {
+      const response = await fetch(SUBMIT_TASK_API_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          taskId: activeTask.id,
-          sellerId: userId,
-          proofUrl,
-          notes,
-          timeSpent: timer,
-        }),
+        body: formData,
       });
 
       const data = await response.json();
@@ -397,15 +443,16 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
         setActiveTask(null);
         setTimer(0);
         setIsTimerRunning(false);
-        setProofUrl('');
-        setNotes('');
+        resetProofFields();
         fetchSellerData();
       } else {
-        alert(data.error || 'Submit task failed');
+        alert(data.error || data.message || 'Submit task failed');
       }
     } catch (error) {
       console.error('Submit task error:', error);
       alert('Server error');
+    } finally {
+      setIsSubmittingTask(false);
     }
   };
 
@@ -823,72 +870,119 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
       </Dialog>
 
       <Dialog open={isTaskDialogOpen} onOpenChange={setIsTaskDialogOpen}>
-        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Complete Task</DialogTitle>
-            <DialogDescription>Perform the task on the platform and submit your proof.</DialogDescription>
-          </DialogHeader>
+        <DialogContent className="max-w-6xl h-[92vh] max-h-[92vh] overflow-hidden p-0 flex flex-col">
+          <div className="shrink-0 bg-white px-4 sm:px-6 pt-5 pb-4 border-b">
+            <DialogHeader>
+              <DialogTitle>Complete Task</DialogTitle>
+              <DialogDescription>Perform the task on the platform and submit your proof.</DialogDescription>
+            </DialogHeader>
+          </div>
+
           {activeTask && (
-            <div className="space-y-4">
-              <div className="flex items-center justify-between p-4 bg-gray-50 rounded-xl">
-                <div className="flex items-center gap-3">
-                  {getPlatformIcon(activeTask.platform)}
-                  <div>
-                    <h3 className="text-gray-900 font-medium">{activeTask.title}</h3>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-sm text-gray-500">{activeTask.type}</span>
-                      <span className="text-gray-300">-</span>
-                      <span className="text-sm text-green-600 font-medium">${activeTask.price} per task</span>
+            <>
+              <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 space-y-4 pb-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-gray-50 rounded-xl">
+                  <div className="flex items-center gap-3">
+                    {getPlatformIcon(activeTask.platform)}
+                    <div>
+                      <h3 className="text-gray-900 font-medium">{activeTask.title}</h3>
+                      <div className="flex flex-wrap items-center gap-2 mt-1">
+                        <span className="text-sm text-gray-500">{activeTask.type}</span>
+                        <span className="text-gray-300">-</span>
+                        <span className="text-sm text-green-600 font-medium">${activeTask.price} per task</span>
+                      </div>
                     </div>
                   </div>
+                  {getDifficultyBadge(activeTask.difficulty)}
                 </div>
-                {getDifficultyBadge(activeTask.difficulty)}
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-gradient-to-r from-green-50 to-green-100 rounded-xl">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Button size="sm" variant="outline" onClick={handlePauseTimer} className="rounded-full">
+                      {isTimerRunning ? <><Pause className="w-4 h-4 mr-1" /> Pause</> : <><Play className="w-4 h-4 mr-1" /> Resume</>}
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={handleStopTask} className="rounded-full text-red-600 border-red-200 hover:bg-red-50">
+                      <StopCircle className="w-4 h-4 mr-1" /> Stop
+                    </Button>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Clock className="w-5 h-5 text-green-600" />
+                    <span className="text-2xl font-mono font-bold text-gray-900">{formatTime(timer)}</span>
+                  </div>
+                </div>
+
+                <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
+                  <h4 className="text-sm font-medium text-blue-900 mb-2">Instructions:</h4>
+                  <ul className="text-sm text-blue-800 space-y-1">
+                    <li>- The task has been opened in a new browser tab.</li>
+                    <li>- Complete the {activeTask.type} action on that tab.</li>
+                    <li>- Take a screenshot as proof.</li>
+                    <li>- Upload the screenshot below and submit the task.</li>
+                  </ul>
+                </div>
+
+                <div className="space-y-4 pt-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="proofImage" className="text-sm font-medium">Proof Screenshot Attachment *</Label>
+                    <div className="border border-dashed border-gray-300 rounded-xl p-3 sm:p-4 bg-gray-50">
+                      <label
+                        htmlFor="proofImage"
+                        className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-green-300 bg-white px-4 py-6 text-center transition hover:border-green-500 hover:bg-green-50"
+                      >
+                        <Upload className="h-8 w-8 text-green-600" />
+                        <span className="text-sm font-semibold text-gray-900">Click to attach proof screenshot</span>
+                        <span className="text-xs text-gray-500">PNG, JPG, JPEG, or WEBP. Max size: {MAX_PROOF_IMAGE_SIZE_MB}MB.</span>
+                      </label>
+
+                      <Input
+                        id="proofImage"
+                        type="file"
+                        accept="image/*"
+                        onChange={handleProofImageChange}
+                        className="hidden"
+                      />
+
+                      {proofImage && (
+                        <div className="mt-3 flex flex-col gap-3 rounded-xl border border-green-200 bg-green-50 p-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium text-green-900 truncate">{proofImage.name}</p>
+                            <p className="text-xs text-green-700">
+                              Selected file - {(proofImage.size / 1024).toFixed(1)} KB
+                            </p>
+                          </div>
+
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="rounded-full border-green-300 bg-white text-green-700 hover:bg-green-100 w-full sm:w-auto"
+                            onClick={removeProofImage}
+                          >
+                            Remove File
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="notes" className="text-sm font-medium">Additional Notes (Optional)</Label>
+                    <Textarea id="notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add any relevant information..." rows={2} className="border-gray-300" />
+                  </div>
+                </div>
               </div>
 
-              <div className="flex items-center justify-between p-4 bg-gradient-to-r from-green-50 to-green-100 rounded-xl">
-                <div className="flex items-center gap-3">
-                  <Button size="sm" variant="outline" onClick={handlePauseTimer} className="rounded-full">
-                    {isTimerRunning ? <><Pause className="w-4 h-4 mr-1" /> Pause</> : <><Play className="w-4 h-4 mr-1" /> Resume</>}
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={handleStopTask} className="rounded-full text-red-600 border-red-200 hover:bg-red-50">
-                    <StopCircle className="w-4 h-4 mr-1" /> Stop
-                  </Button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <Clock className="w-5 h-5 text-green-600" />
-                  <span className="text-2xl font-mono font-bold text-gray-900">{formatTime(timer)}</span>
-                </div>
-              </div>
-
-              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4">
-                <h4 className="text-sm font-medium text-blue-900 mb-2">Instructions:</h4>
-                <ul className="text-sm text-blue-800 space-y-1">
-                  <li>- The task has been opened in a new browser tab.</li>
-                  <li>- Complete the {activeTask.type} action on that tab.</li>
-                  <li>- Take a screenshot or copy the URL as proof.</li>
-                  <li>- Paste the proof URL below and submit the task.</li>
-                </ul>
-              </div>
-
-              <div className="space-y-4 pt-2">
-                <div className="space-y-2">
-                  <Label htmlFor="proofUrl" className="text-sm font-medium">Proof URL / Screenshot Link *</Label>
-                  <Input id="proofUrl" value={proofUrl} onChange={(event) => setProofUrl(event.target.value)} placeholder="https://imgur.com/screenshot or profile URL" className="border-gray-300" />
-                  <p className="text-xs text-gray-500">Provide a link to your screenshot or the profile/post URL</p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="notes" className="text-sm font-medium">Additional Notes (Optional)</Label>
-                  <Textarea id="notes" value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Add any relevant information..." rows={3} className="border-gray-300" />
-                </div>
-              </div>
-
-              <div className="flex gap-3 pt-4 border-t">
-                <Button className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full" onClick={handleSubmitTask} disabled={!proofUrl}>
-                  <Upload className="w-4 h-4 mr-2" /> Submit Task
+              <div className="shrink-0 flex flex-col sm:flex-row gap-3 border-t bg-white px-4 sm:px-6 py-4 shadow-[0_-8px_20px_rgba(15,23,42,0.06)]">
+                <Button
+                  className="flex-1 bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white rounded-full"
+                  onClick={handleSubmitTask}
+                  disabled={isSubmittingTask || !proofImage}
+                >
+                  <Upload className="w-4 h-4 mr-2" /> {isSubmittingTask ? 'Submitting...' : 'Submit Task'}
                 </Button>
-                <Button variant="outline" className="rounded-full" onClick={() => setIsTaskDialogOpen(false)}>Cancel</Button>
+                <Button variant="outline" className="rounded-full w-full sm:w-auto" onClick={() => { setIsTaskDialogOpen(false); resetProofFields(); }}>Cancel</Button>
               </div>
-            </div>
+            </>
           )}
         </DialogContent>
       </Dialog>
