@@ -11,7 +11,7 @@ from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from BackEnd.utils import assign_jobs_round_robin
-from .models import BuyerProfile, BuyerTasks, EasypaisaTransaction, RatingIndexes, SellerProfile, SellerWithdrawalRequest, User,JobsHistory,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
+from .models import BuyerProfile, BuyerTasks, EasypaisaTransaction, RatingIndexes, SellerBehaviorLog, SellerProfile, SellerWithdrawalRequest, User,JobsHistory,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
 from .seller_rating import calculate_seller_rating, rating_dataset_summary, update_seller_rating
 from django.db import transaction
 from django.views.decorators.http import require_http_methods
@@ -55,6 +55,24 @@ def get_easypaisa_error_message(code):
         "0016": "Expiry date should be a future date.",
     }
     return errors.get(str(code or ""), "EasyPaisa payment failed. Please try again.")
+
+
+def get_client_ip(request):
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR")
+
+
+def create_seller_behavior_log(request, job):
+    return SellerBehaviorLog.objects.create(
+        job=job,
+        task_id=str(job.task_id or job.task.id),
+        seller_id=str(job.seller_id or job.seller.id),
+        ip_address=get_client_ip(request),
+        device_id=request.headers.get("X-Device-Id", ""),
+        user_agent=request.META.get("HTTP_USER_AGENT", ""),
+    )
 
 
 def initiate_easypaisa_ma_transaction(payload):
@@ -1215,7 +1233,7 @@ def review_seller_proof(request, job_id):
 
     try:
         with transaction.atomic():
-            job = JobsHistory.objects.select_for_update().select_related("seller").get(id=job_id)
+            job = JobsHistory.objects.select_for_update().select_related("seller", "task").get(id=job_id)
             job.proofStatus = proof_status
             job.proofReviewedDate = timezone.now()
             if proof_status == "invalid":
@@ -1223,6 +1241,9 @@ def review_seller_proof(request, job_id):
             elif job.status == "rejected":
                 job.status = "completed"
             job.save(update_fields=["proofStatus", "proofReviewedDate", "status"])
+            behavior_log = None
+            if proof_status == "valid":
+                behavior_log = create_seller_behavior_log(request, job)
             rating_data = update_seller_rating(job.seller)
     except JobsHistory.DoesNotExist:
         return JsonResponse({"error": "Job not found"}, status=404)
@@ -1231,6 +1252,7 @@ def review_seller_proof(request, job_id):
         "message": "Proof reviewed successfully",
         "jobId": job.id,
         "proofStatus": job.proofStatus,
+        "behaviorLogId": behavior_log.id if behavior_log else None,
         "sellerRating": rating_data,
     }, status=200)
 

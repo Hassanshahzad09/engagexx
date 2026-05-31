@@ -169,6 +169,22 @@ class JobsHistory(models.Model):
             models.UniqueConstraint(fields=["seller", "task"], name="unique_seller_task_assignment"),
         ]
 
+
+class SellerBehaviorLog(models.Model):
+    job = models.ForeignKey(JobsHistory, on_delete=models.CASCADE, related_name="behavior_logs", null=True, blank=True)
+    task_id = models.CharField(max_length=100)
+    seller_id = models.CharField(max_length=100)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    device_id = models.CharField(max_length=255, blank=True)
+    user_agent = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Seller {self.seller_id} - Task {self.task_id} - {self.created_at}"
+
 # current indexes of each rating seller
 
 class RatingIndexes(models.Model):
