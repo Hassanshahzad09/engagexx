@@ -37,7 +37,7 @@ urlpatterns = [
     path('assign-jobs/', views.assign_jobs_api, name="assign-jobs"),
     path('connections/', views.connections_status),
     path('disconnect/<str:platform>/', views.disconnect_platform),
-
+    
 ]
 
 

@@ -26,3 +26,48 @@ def assign_jobs_round_robin(sellers: list, jobs_to_assign: int, last_index: int)
     new_last_index = (current_index - 1 + n) % n
 
     return assigned, new_last_index
+
+
+
+
+
+import hashlib
+import imagehash
+from PIL import Image
+
+
+HAMMING_THRESHOLD = 10
+
+
+def get_sha256(file) -> str:
+    """
+    Exact duplicate detection.
+    Same exact screenshot gives same SHA-256 hash.
+    """
+    file.seek(0)
+    sha256 = hashlib.sha256()
+
+    for chunk in file.chunks():
+        sha256.update(chunk)
+
+    file.seek(0)
+    return sha256.hexdigest()
+
+
+def get_phash(file) -> str:
+    """
+    Similar duplicate detection.
+    Edited/resized/compressed image can still have close pHash.
+    """
+    file.seek(0)
+    image = Image.open(file).convert("RGB")
+    phash = str(imagehash.phash(image))
+    file.seek(0)
+    return phash
+
+
+def hamming_distance(hash1: str, hash2: str) -> int:
+    """
+    Lower value means images are more similar.
+    """
+    return imagehash.hex_to_hash(hash1) - imagehash.hex_to_hash(hash2)

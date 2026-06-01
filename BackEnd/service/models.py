@@ -8,7 +8,6 @@ class User(AbstractUser):
         ('buyer', 'Buyer'),
         ('seller', 'Seller'),
     )
-
     email = models.EmailField(unique=True)
     role = models.CharField(max_length=10, choices=ROLE_CHOICES)
     wallet_balance = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -84,6 +83,7 @@ class BuyerProfile(models.Model):
 
 class SellerProfile(models.Model):
     unethical_reports = models.IntegerField(default=0)
+    trust_score = models.DecimalField(max_digits=5, decimal_places=2, default=100)
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     totalEarnings = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     ratings = models.IntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(5)])
@@ -170,6 +170,11 @@ class JobsHistory(models.Model):
 )
 
     proofSha256 = models.CharField(
+    max_length=64,
+    blank=True,
+    db_index=True
+)
+    proofPhash = models.CharField(
     max_length=64,
     blank=True,
     db_index=True
