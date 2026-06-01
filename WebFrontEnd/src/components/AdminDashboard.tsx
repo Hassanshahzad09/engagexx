@@ -662,20 +662,21 @@ export default function AdminDashboard({ onLogout }) {
         {pendingReviewProofs.map((proof) => {
           const isProofReviewed = proof.proofStatus === 'valid' || proof.proofStatus === 'invalid';
           const isAuditReviewed = proof.auditStatus === 'passed' || proof.auditStatus === 'failed';
+          const proofMediaUrl = proof.proofImageUrl || proof.proofUrl;
 
           return (
           <div key={proof.jobId} className="border border-gray-200 rounded-xl p-4">
             <div className="flex flex-col lg:flex-row gap-4">
               <div className="w-full lg:w-56 flex-shrink-0">
                 <div className="aspect-video bg-gray-100 rounded-lg overflow-hidden border border-gray-200 flex items-center justify-center">
-                  {proof.proofUrl ? (
-                    <img src={proof.proofUrl} alt="Submitted proof" className="w-full h-full object-cover" />
+                  {proofMediaUrl ? (
+                    <img src={proofMediaUrl} alt="Submitted proof" className="w-full h-full object-cover" />
                   ) : (
                     <span className="text-xs text-gray-500">No proof image</span>
                   )}
                 </div>
-                {proof.proofUrl && (
-                  <Button size="sm" variant="outline" className="w-full mt-2 rounded-full" onClick={() => window.open(proof.proofUrl, '_blank', 'noopener,noreferrer')}>
+                {proofMediaUrl && (
+                  <Button size="sm" variant="outline" className="w-full mt-2 rounded-full" onClick={() => window.open(proofMediaUrl, '_blank', 'noopener,noreferrer')}>
                     <Eye className="w-4 h-4 mr-2" />
                     Open Proof
                   </Button>

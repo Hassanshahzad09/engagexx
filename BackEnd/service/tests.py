@@ -4,7 +4,17 @@ from unittest.mock import patch
 
 from django.test import RequestFactory, TestCase
 
-from .models import BuyerProfile, BuyerTasks, JobsHistory, SellerBehaviorLog, SellerProfile, User
+from .models import (
+    BuyerProfile,
+    BuyerTasks,
+    JobsHistory,
+    SellerBehaviorLog,
+    SellerProfile,
+    SocialAccount,
+    Transaction,
+    User,
+    VirtualWallet,
+)
 from .seller_rating import (
     DEFAULT_NEW_SELLER_RATING,
     calculate_rating_from_metrics,
@@ -189,18 +199,44 @@ class SellerRatingHistoryTests(TestCase):
         self.seller = SellerProfile.objects.create(user=self.seller_user)
         self.factory = RequestFactory()
 
-    def create_task(self, title):
+    def create_task(self, title, platform="instagram", goal=1, price=1):
         return BuyerTasks.objects.create(
             buyer=self.buyer,
             title=title,
-            platform="instagram",
+            platform=platform,
             taskType="likes",
             url="https://example.com/post",
-            goal=1,
-            pricePerAction=1,
+            goal=goal,
+            pricePerAction=price,
             status="active",
             approval_status="approved",
         )
+
+    def connect_platform(self, platform="instagram"):
+        return SocialAccount.objects.create(
+            platform=platform,
+            username=f"{platform}_seller",
+            social_id=f"{platform}-123",
+            access_token="token",
+            sellerId=self.seller.id,
+        )
+
+    def create_payable_job(self, title="Payable task", platform="instagram", goal=1, price=Decimal("1.00")):
+        task = self.create_task(title, platform=platform, goal=goal, price=price)
+        wallet = VirtualWallet.objects.create(
+            task=task,
+            buyer=self.buyer,
+            amount=Decimal(str(goal)) * price,
+            status="holding",
+        )
+        job = JobsHistory.objects.create(
+            seller=self.seller,
+            task=task,
+            status="pending",
+            proofStatus="pending",
+        )
+        self.connect_platform(platform)
+        return task, wallet, job
 
     def test_seller_profile_database_default_rating_is_three_star(self):
         fresh_user = User.objects.create_user(
@@ -273,12 +309,12 @@ class SellerRatingHistoryTests(TestCase):
         self.assertLess(rating_data["trust_score"], 50)
         self.assertEqual(self.seller.ratings, rating_data["rating"])
 
-    def test_duplicate_seller_task_assignment_is_rejected(self):
+    def test_duplicate_seller_task_assignment_is_allowed_for_multiple_actions(self):
         task = self.create_task("Unique task")
         JobsHistory.objects.create(seller=self.seller, task=task)
+        JobsHistory.objects.create(seller=self.seller, task=task)
 
-        with self.assertRaises(Exception):
-            JobsHistory.objects.create(seller=self.seller, task=task)
+        self.assertEqual(JobsHistory.objects.filter(seller=self.seller, task=task).count(), 2)
 
     def test_backend_generates_seller_behavior_device_fingerprint(self):
         job = JobsHistory.objects.create(
@@ -306,3 +342,140 @@ class SellerRatingHistoryTests(TestCase):
         self.assertEqual(behavior_log.ip_address, "127.0.0.1")
         self.assertEqual(behavior_log.device_id, expected_device_id)
         self.assertEqual(behavior_log.user_agent, "EngageX Test Browser")
+
+    def test_normal_task_submit_waits_for_admin_and_does_not_release_payment(self):
+        task, wallet, job = self.create_payable_job()
+
+        response = self.client.post(
+            "/api/submit-task/",
+            data={
+                "taskId": task.id,
+                "sellerId": self.seller.user.id,
+                "proofUrl": "https://example.com/proof.png",
+                "notes": "done",
+                "timeSpent": "120",
+            },
+            content_type="application/json",
+            HTTP_USER_AGENT="EngageX Test Browser",
+            REMOTE_ADDR="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        job.refresh_from_db()
+        wallet.refresh_from_db()
+        self.seller_user.refresh_from_db()
+        task.refresh_from_db()
+
+        self.assertEqual(job.status, "submitted")
+        self.assertEqual(job.proofStatus, "pending")
+        self.assertEqual(job.priceEarned, Decimal("0.00"))
+        self.assertEqual(self.seller_user.wallet_balance, Decimal("0.00"))
+        self.assertEqual(wallet.amount, Decimal("1.00"))
+        self.assertEqual(task.progressed, Decimal("0.00"))
+        self.assertEqual(SellerBehaviorLog.objects.filter(job=job).count(), 1)
+
+    @patch("service.seller_rating.predict_rating_with_ml_model", return_value=None)
+    def test_admin_valid_proof_releases_payment_and_completes_job(self, _mock_ml):
+        task, wallet, job = self.create_payable_job()
+        job.status = "submitted"
+        job.proofStatus = "pending"
+        job.proofUrl = "https://example.com/proof.png"
+        job.save(update_fields=["status", "proofStatus", "proofUrl"])
+
+        response = self.client.post(
+            f"/api/seller-proof/{job.id}/review/",
+            data='{"proofStatus": "valid"}',
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        job.refresh_from_db()
+        wallet.refresh_from_db()
+        self.seller_user.refresh_from_db()
+        task.refresh_from_db()
+
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.proofStatus, "valid")
+        self.assertEqual(job.priceEarned, Decimal("1.00"))
+        self.assertEqual(self.seller_user.wallet_balance, Decimal("1.00"))
+        self.assertEqual(wallet.amount, Decimal("0.00"))
+        self.assertEqual(wallet.status, "released")
+        self.assertEqual(task.progressed, Decimal("1.00"))
+        self.assertEqual(Transaction.objects.filter(user=self.seller_user, type="escrow_release").count(), 1)
+
+    @patch("service.seller_rating.predict_rating_with_ml_model", return_value=None)
+    def test_admin_invalid_proof_rejects_without_payment(self, _mock_ml):
+        task, wallet, job = self.create_payable_job()
+        job.status = "submitted"
+        job.proofStatus = "pending"
+        job.proofUrl = "https://example.com/proof.png"
+        job.save(update_fields=["status", "proofStatus", "proofUrl"])
+
+        response = self.client.post(
+            f"/api/seller-proof/{job.id}/review/",
+            data='{"proofStatus": "invalid"}',
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        job.refresh_from_db()
+        wallet.refresh_from_db()
+        self.seller_user.refresh_from_db()
+        task.refresh_from_db()
+
+        self.assertEqual(job.status, "rejected")
+        self.assertEqual(job.proofStatus, "invalid")
+        self.assertEqual(job.priceEarned, Decimal("0.00"))
+        self.assertEqual(self.seller_user.wallet_balance, Decimal("0.00"))
+        self.assertEqual(wallet.amount, Decimal("1.00"))
+        self.assertEqual(wallet.status, "holding")
+        self.assertEqual(task.progressed, Decimal("0.00"))
+        self.assertEqual(Transaction.objects.count(), 0)
+
+    @patch("service.seller_rating.predict_rating_with_ml_model", return_value=None)
+    def test_youtube_seventy_percent_submit_auto_approves_and_releases_payment(self, _mock_ml):
+        task, wallet, job = self.create_payable_job(platform="youtube")
+
+        response = self.client.post(
+            "/api/submit-task/",
+            data={
+                "taskId": task.id,
+                "sellerId": self.seller.user.id,
+                "proofUrl": "watched_70_percent",
+                "notes": "Auto-submitted after 70% video watch",
+                "timeSpent": "300",
+            },
+            content_type="application/json",
+            HTTP_USER_AGENT="EngageX Test Browser",
+            REMOTE_ADDR="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        job.refresh_from_db()
+        wallet.refresh_from_db()
+        self.seller_user.refresh_from_db()
+        task.refresh_from_db()
+
+        self.assertEqual(job.status, "completed")
+        self.assertEqual(job.proofStatus, "valid")
+        self.assertEqual(job.priceEarned, Decimal("1.00"))
+        self.assertEqual(self.seller_user.wallet_balance, Decimal("1.00"))
+        self.assertEqual(wallet.status, "released")
+        self.assertEqual(task.progressed, Decimal("1.00"))
+
+    def test_admin_seller_monitor_returns_uploaded_screenshot_url(self):
+        task = self.create_task("Screenshot proof task")
+        job = JobsHistory.objects.create(
+            seller=self.seller,
+            task=task,
+            status="submitted",
+            proofStatus="pending",
+            proofImage="proof_screenshots/example.png",
+        )
+
+        response = self.client.get("/api/admin-seller-monitor/")
+
+        self.assertEqual(response.status_code, 200)
+        proof_rows = response.json()["proofs"]
+        proof_row = next(row for row in proof_rows if row["jobId"] == job.id)
+        self.assertIn("/media/proof_screenshots/example.png", proof_row["proofImageUrl"])

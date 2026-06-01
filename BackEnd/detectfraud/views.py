@@ -109,7 +109,11 @@ def load_model():
         le_seller       = joblib.load(SELLER_ENCODER)
         le_task         = joblib.load(TASK_ENCODER)
         feature_columns = joblib.load(FEATURE_COLUMNS)
-        explainer       = joblib.load(EXPLAINER_PATH)
+        try:
+            explainer = joblib.load(EXPLAINER_PATH)
+        except Exception as exc:
+            explainer = None
+            print(f"[EngageX] SHAP explainer could not be loaded: {exc}")
         print("[EngageX] Model loaded from disk")
         print(f"[EngageX] seller_type mapping: {list(le_seller.classes_)}")
         print(f"[EngageX] task_type mapping:   {list(le_task.classes_)}")

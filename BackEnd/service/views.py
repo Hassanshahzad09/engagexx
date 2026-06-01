@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
-from django.db.models import Count, Sum
+from django.db.models import Count, Sum, Q
 from django.db.models.functions import TruncMonth
 from django.http import JsonResponse
 from django.utils import timezone
@@ -889,7 +889,7 @@ def admin_seller_monitor(request):
 
     proof_jobs = (
         JobsHistory.objects
-        .exclude(proofUrl="")
+        .filter(Q(proofUrl__gt="") | Q(proofImage__isnull=False))
         .select_related("seller__user", "task")
         .order_by("-endDate", "-startDate")[:100]
     )
@@ -907,6 +907,7 @@ def admin_seller_monitor(request):
             "platform": job.task.platform.title(),
             "taskType": job.task.taskType.title(),
             "proofUrl": job.proofUrl,
+            "proofImageUrl": request.build_absolute_uri(job.proofImage.url) if job.proofImage else "",
             "proofStatus": job.proofStatus,
             "auditStatus": job.auditStatus,
             "submittedAt": job.endDate.strftime("%Y-%m-%d %H:%M") if job.endDate else "",
@@ -1025,6 +1026,65 @@ def calculate_file_sha256(uploaded_file):
     return sha256.hexdigest()
 
 
+def approve_seller_job(job, task, seller_profile, virtual_wallet, payment_amount):
+    if job.status == "completed" and job.proofStatus == "valid":
+        return update_seller_rating(seller_profile)
+
+    if virtual_wallet.status != "holding":
+        raise ValueError("Task payment is not available")
+
+    if payment_amount <= 0:
+        raise ValueError("Task price is not valid")
+
+    if virtual_wallet.amount < payment_amount:
+        raise ValueError("Task payment wallet does not have enough balance")
+
+    seller_user = seller_profile.user
+    seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) + payment_amount
+    seller_user.save(update_fields=["wallet_balance"])
+
+    seller_profile.totalEarnings = (seller_profile.totalEarnings or Decimal("0.00")) + payment_amount
+    seller_profile.save(update_fields=["totalEarnings"])
+
+    job.proofStatus = "valid"
+    job.proofReviewedDate = timezone.now()
+    job.status = "completed"
+    job.progress = Decimal("1.00")
+    job.priceEarned = payment_amount
+    job.endDate = timezone.now()
+    job.save(update_fields=[
+        "proofStatus",
+        "proofReviewedDate",
+        "status",
+        "progress",
+        "priceEarned",
+        "endDate",
+    ])
+
+    task.progressed = (task.progressed or Decimal("0.00")) + Decimal("1.00")
+    if task.progressed >= task.goal:
+        task.status = "completed"
+        task.endDate = timezone.now()
+    else:
+        task.status = "in_progress"
+    task.save(update_fields=["status", "progressed", "endDate"])
+
+    virtual_wallet.amount = virtual_wallet.amount - payment_amount
+    virtual_wallet.seller = seller_profile
+    if task.status == "completed" or virtual_wallet.amount <= 0:
+        virtual_wallet.status = "released"
+    virtual_wallet.save(update_fields=["amount", "status", "seller", "updated_at"])
+
+    Transaction.objects.create(
+        user=seller_user,
+        amount=payment_amount,
+        type="escrow_release",
+        description=f"Seller job approved: {task.title}",
+    )
+
+    return update_seller_rating(seller_profile)
+
+
 @csrf_exempt
 def submit_task(request):
     proof_image = None
@@ -1033,13 +1093,11 @@ def submit_task(request):
     if content_type.startswith("multipart/form-data"):
         data = request.POST
         proof_image = request.FILES.get("proofImage")
-
     elif content_type.startswith("application/json"):
         try:
             data = json.loads(request.body.decode("utf-8"))
         except json.JSONDecodeError:
             return JsonResponse({"error": "Invalid JSON format"}, status=400)
-
     else:
         return JsonResponse({"error": "Unsupported content type"}, status=400)
 
@@ -1049,16 +1107,8 @@ def submit_task(request):
     notes = data.get("notes", "")
     time_spent_seconds = data.get("timeSpent", 0)
 
-    proof_sha256 = ""
-
-    if proof_image:
-        proof_sha256 = calculate_file_sha256(proof_image)
-
     if not task_id or not seller_id:
         return JsonResponse({"error": "taskId and sellerId are required"}, status=400)
-
-    if not proof_url and not proof_image:
-        return JsonResponse({"error": "Proof URL or screenshot image is required"}, status=400)
 
     try:
         time_spent_seconds = Decimal(str(time_spent_seconds))
@@ -1069,6 +1119,7 @@ def submit_task(request):
         time_spent_seconds = Decimal("0.00")
 
     time_spent = (time_spent_seconds / Decimal("3600.00")).quantize(Decimal("0.0001"))
+    proof_sha256 = calculate_file_sha256(proof_image) if proof_image else ""
 
     try:
         with transaction.atomic():
@@ -1076,23 +1127,29 @@ def submit_task(request):
             task = BuyerTasks.objects.select_for_update().get(id=task_id)
             virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
             job = (
-        JobsHistory.objects
-        .select_for_update()
-        .filter(
-            task=task,
-            seller=seller_profile,
-            status="pending",
-        )
-        .order_by("startDate")
-        .first()
-)
+                JobsHistory.objects
+                .select_for_update()
+                .filter(
+                    task=task,
+                    seller=seller_profile,
+                    status="pending",
+                )
+                .order_by("startDate")
+                .first()
+            )
 
             if not job:
                 return JsonResponse(
-            {"error": "This task is not assigned to this seller"},
-            status=400
-        )
+                    {"error": "This task is not assigned to this seller"},
+                    status=400
+                )
+
             platform = (task.platform or "").strip().lower()
+            is_youtube_auto = platform == "youtube" and proof_url == "watched_70_percent"
+
+            if not is_youtube_auto and not proof_url and not proof_image:
+                return JsonResponse({"error": "Proof URL or screenshot image is required"}, status=400)
+
             connected_platforms = get_connected_platforms_for_seller(seller_profile)
 
             if platform not in connected_platforms:
@@ -1115,76 +1172,67 @@ def submit_task(request):
             if virtual_wallet.amount < payment_amount:
                 return JsonResponse({"error": "Task payment wallet does not have enough balance"}, status=400)
 
-            seller_user = seller_profile.user
-            seller_user.wallet_balance = (seller_user.wallet_balance or Decimal("0.00")) + payment_amount
-            seller_user.save(update_fields=["wallet_balance"])
-
-            seller_profile.totalEarnings = (seller_profile.totalEarnings or Decimal("0.00")) + payment_amount
             seller_profile.avgCompletionTime = time_spent
-            seller_profile.save(update_fields=["totalEarnings", "avgCompletionTime"])
+            seller_profile.save(update_fields=["avgCompletionTime"])
 
             job.proofUrl = proof_url
             job.proofImage = proof_image
             job.proofSha256 = proof_sha256
-            job.proofStatus = "valid"
-            job.proofReviewedDate = timezone.now()
             job.notes = notes
             job.completionTime = time_spent
-            job.status = "completed"
-            job.progress = Decimal("1.00")
-            job.priceEarned = payment_amount
             job.endDate = timezone.now()
+
+            if is_youtube_auto:
+                job.save(update_fields=[
+                    "proofUrl",
+                    "proofImage",
+                    "proofSha256",
+                    "notes",
+                    "completionTime",
+                    "endDate",
+                ])
+
+                behavior_log = create_seller_behavior_log(request, job)
+                rating_data = approve_seller_job(job, task, seller_profile, virtual_wallet, payment_amount)
+
+                return JsonResponse({
+                    "message": "YouTube task auto-approved after 70% watch",
+                    "jobStatus": job.status,
+                    "proofStatus": job.proofStatus,
+                    "behaviorLogId": behavior_log.id,
+                    "sellerRating": rating_data,
+                }, status=200)
+
+            job.status = "submitted"
+            job.proofStatus = "pending"
+            job.proofReviewedDate = None
             job.save(update_fields=[
-    "proofUrl",
-    "proofImage",
-    "proofSha256",
-    "proofStatus",
-    "proofReviewedDate",
-    "notes",
-    "completionTime",
-    "status",
-    "progress",
-    "priceEarned",
-    "endDate",
-])
-
-            task.progressed = (task.progressed or Decimal("0.00")) + Decimal("1.00")
-            if task.progressed >= task.goal:
-                task.status = "completed"
-                task.endDate = timezone.now()
-            else:
-                task.status = "in_progress"
-
-            task.save(update_fields=["status", "progressed", "endDate"])
-
-            virtual_wallet.amount = virtual_wallet.amount - payment_amount
-            virtual_wallet.seller = seller_profile
-            if task.status == "completed" or virtual_wallet.amount <= 0:
-                virtual_wallet.status = "released"
-            virtual_wallet.save(update_fields=["amount", "status", "seller", "updated_at"])
-
-            Transaction.objects.create(
-                user=seller_user,
-                amount=payment_amount,
-                type="escrow_release",
-                description=f"Seller action completed: {task.title}",
-            )
+                "proofUrl",
+                "proofImage",
+                "proofSha256",
+                "proofStatus",
+                "proofReviewedDate",
+                "notes",
+                "completionTime",
+                "status",
+                "endDate",
+            ])
 
             behavior_log = create_seller_behavior_log(request, job)
-            rating_data = update_seller_rating(seller_profile)
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
     except BuyerTasks.DoesNotExist:
         return JsonResponse({"error": "Task not found"}, status=404)
-    except JobsHistory.DoesNotExist:
-        return JsonResponse({"error": "This task is not assigned to this seller"}, status=400)
     except VirtualWallet.DoesNotExist:
         return JsonResponse({"error": "Task payment wallet not found"}, status=404)
+    except ValueError as error:
+        return JsonResponse({"error": str(error)}, status=400)
 
     return JsonResponse({
-        "message": "Task submitted successfully and one action payment released",
+        "message": "Task submitted successfully and sent to admin for approval",
+        "jobStatus": job.status,
+        "proofStatus": job.proofStatus,
         "behaviorLogId": behavior_log.id,
-        "sellerRating": rating_data,
     }, status=200)
 
 
@@ -1284,21 +1332,37 @@ def review_seller_proof(request, job_id):
 
     try:
         with transaction.atomic():
-            job = JobsHistory.objects.select_for_update().select_related("seller", "task").get(id=job_id)
-            job.proofStatus = proof_status
-            job.proofReviewedDate = timezone.now()
-            if proof_status == "invalid":
+            job = (
+                JobsHistory.objects
+                .select_for_update()
+                .select_related("seller", "seller__user", "task")
+                .get(id=job_id)
+            )
+            task = BuyerTasks.objects.select_for_update().get(id=job.task.id)
+            virtual_wallet = VirtualWallet.objects.select_for_update().get(task=task)
+            payment_amount = task.pricePerAction or Decimal("0.00")
+
+            if proof_status == "valid":
+                rating_data = approve_seller_job(job, task, job.seller, virtual_wallet, payment_amount)
+                message = "Seller proof approved and payment released"
+            else:
+                job.proofStatus = "invalid"
+                job.proofReviewedDate = timezone.now()
                 job.status = "rejected"
-            elif job.status == "rejected":
-                job.status = "completed"
-            job.save(update_fields=["proofStatus", "proofReviewedDate", "status"])
-            rating_data = update_seller_rating(job.seller)
+                job.save(update_fields=["proofStatus", "proofReviewedDate", "status"])
+                rating_data = update_seller_rating(job.seller)
+                message = "Seller proof rejected"
     except JobsHistory.DoesNotExist:
         return JsonResponse({"error": "Job not found"}, status=404)
+    except VirtualWallet.DoesNotExist:
+        return JsonResponse({"error": "Task payment wallet not found"}, status=404)
+    except ValueError as error:
+        return JsonResponse({"error": str(error)}, status=400)
 
     return JsonResponse({
-        "message": "Proof reviewed successfully",
+        "message": message,
         "jobId": job.id,
+        "jobStatus": job.status,
         "proofStatus": job.proofStatus,
         "sellerRating": rating_data,
     }, status=200)
