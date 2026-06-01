@@ -1,5 +1,6 @@
 import json
 import base64
+import hashlib
 import uuid
 from decimal import Decimal, InvalidOperation
 import requests
@@ -65,13 +66,18 @@ def get_client_ip(request):
 
 
 def create_seller_behavior_log(request, job):
+    ip_address = get_client_ip(request)
+    user_agent = request.META.get("HTTP_USER_AGENT", "")
+    device_source = f"{ip_address or ''}|{user_agent}"
+    device_id = hashlib.sha256(device_source.encode("utf-8")).hexdigest()
+
     return SellerBehaviorLog.objects.create(
         job=job,
         task_id=str(job.task_id or job.task.id),
         seller_id=str(job.seller_id or job.seller.id),
-        ip_address=get_client_ip(request),
-        device_id=request.headers.get("X-Device-Id", ""),
-        user_agent=request.META.get("HTTP_USER_AGENT", ""),
+        ip_address=ip_address,
+        device_id=device_id,
+        user_agent=user_agent,
     )
 
 
@@ -1008,8 +1014,6 @@ def approved_tasks(request):
 
     return JsonResponse({"tasks": data}, status=200)
 
-import hashlib
-
 def calculate_file_sha256(uploaded_file):
     sha256 = hashlib.sha256()
 
@@ -1166,6 +1170,7 @@ def submit_task(request):
                 description=f"Seller action completed: {task.title}",
             )
 
+            behavior_log = create_seller_behavior_log(request, job)
             rating_data = update_seller_rating(seller_profile)
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
@@ -1178,6 +1183,7 @@ def submit_task(request):
 
     return JsonResponse({
         "message": "Task submitted successfully and one action payment released",
+        "behaviorLogId": behavior_log.id,
         "sellerRating": rating_data,
     }, status=200)
 
@@ -1286,9 +1292,6 @@ def review_seller_proof(request, job_id):
             elif job.status == "rejected":
                 job.status = "completed"
             job.save(update_fields=["proofStatus", "proofReviewedDate", "status"])
-            behavior_log = None
-            if proof_status == "valid":
-                behavior_log = create_seller_behavior_log(request, job)
             rating_data = update_seller_rating(job.seller)
     except JobsHistory.DoesNotExist:
         return JsonResponse({"error": "Job not found"}, status=404)
@@ -1297,7 +1300,6 @@ def review_seller_proof(request, job_id):
         "message": "Proof reviewed successfully",
         "jobId": job.id,
         "proofStatus": job.proofStatus,
-        "behaviorLogId": behavior_log.id if behavior_log else None,
         "sellerRating": rating_data,
     }, status=200)
 

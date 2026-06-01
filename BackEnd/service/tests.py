@@ -1,7 +1,8 @@
 from decimal import Decimal
+import hashlib
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import RequestFactory, TestCase
 
 from .models import BuyerProfile, BuyerTasks, JobsHistory, SellerBehaviorLog, SellerProfile, User
 from .seller_rating import (
@@ -14,6 +15,7 @@ from .seller_rating import (
     score_to_rating,
     update_seller_rating,
 )
+from .views import create_seller_behavior_log
 
 
 class SellerRatingFormulaTests(TestCase):
@@ -185,6 +187,7 @@ class SellerRatingHistoryTests(TestCase):
             role="seller",
         )
         self.seller = SellerProfile.objects.create(user=self.seller_user)
+        self.factory = RequestFactory()
 
     def create_task(self, title):
         return BuyerTasks.objects.create(
@@ -277,7 +280,7 @@ class SellerRatingHistoryTests(TestCase):
         with self.assertRaises(Exception):
             JobsHistory.objects.create(seller=self.seller, task=task)
 
-    def test_valid_proof_review_creates_seller_behavior_log(self):
+    def test_backend_generates_seller_behavior_device_fingerprint(self):
         job = JobsHistory.objects.create(
             seller=self.seller,
             task=self.create_task("Behavior log task"),
@@ -286,21 +289,20 @@ class SellerRatingHistoryTests(TestCase):
             proofStatus="pending",
         )
 
-        response = self.client.post(
-            f"/api/seller-proof/{job.id}/review/",
-            data='{"proofStatus": "valid"}',
-            content_type="application/json",
-            HTTP_X_DEVICE_ID="test-device-123",
+        request = self.factory.post(
+            "/api/submit-task/",
             HTTP_USER_AGENT="EngageX Test Browser",
             REMOTE_ADDR="127.0.0.1",
         )
+        behavior_log = create_seller_behavior_log(request, job)
+        expected_device_id = hashlib.sha256(
+            "127.0.0.1|EngageX Test Browser".encode("utf-8")
+        ).hexdigest()
 
-        self.assertEqual(response.status_code, 200)
         self.assertEqual(SellerBehaviorLog.objects.count(), 1)
-        behavior_log = SellerBehaviorLog.objects.get()
         self.assertEqual(behavior_log.job, job)
         self.assertEqual(behavior_log.task_id, str(job.task.id))
         self.assertEqual(behavior_log.seller_id, str(self.seller.id))
         self.assertEqual(behavior_log.ip_address, "127.0.0.1")
-        self.assertEqual(behavior_log.device_id, "test-device-123")
+        self.assertEqual(behavior_log.device_id, expected_device_id)
         self.assertEqual(behavior_log.user_agent, "EngageX Test Browser")
