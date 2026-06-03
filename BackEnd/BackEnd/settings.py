@@ -34,7 +34,7 @@ CORS_ALLOWED_ORIGINS = [
     
 ]
 
-CORS_ALLOW_ALL_ORIGINS = False
+CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     'social_auth',
     'rest_framework',
     'detectfraud',
+    'proof_checker',
  
 ]
 
@@ -69,6 +70,7 @@ CORS_ALLOW_HEADERS = [
 ]
 
 MIDDLEWARE = [
+     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',

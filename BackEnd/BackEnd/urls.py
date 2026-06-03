@@ -8,5 +8,6 @@ urlpatterns = [
     path('api/', include('service.urls')),
     path('ml/', include('mlservice.urls')),
     path('oauth/',include('social_auth.urls')),
-    path('fraud/',include('detectfraud.urls'))
+    path('fraud/',include('detectfraud.urls')),
+    path('proof_checker/',include('proof_checker.urls')),
 ]
