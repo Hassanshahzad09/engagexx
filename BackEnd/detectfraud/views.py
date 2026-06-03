@@ -14,7 +14,7 @@ import shap
 
 from BackEnd.utils import get_sha256, get_phash, hamming_distance, HAMMING_THRESHOLD
 from service.models import JobsHistory, BuyerTasks, SellerProfile, SellerBehaviorLog
-
+from .models import FraudAnalysisResult
 
 # ======================================================
 # PATHS
@@ -762,7 +762,7 @@ def analyzeRepetitiveBehavior(request):
 
     return JsonResponse({
         "task_id": task_id, "seller_id": seller_id, "task_type": task_type,
-        "layer_a": {"completion_times": completion_times, "std_dev": round(std_dev,2), "timing_consistency_label": timing_consistency_label, "timing_consistency_score": timing_consistency_score},
+        "layer_a": {"completion_times": completion_times, "std_dev": round(std_dev,2)  if std_dev is not None else 0.0, "timing_consistency_label": timing_consistency_label, "timing_consistency_score": timing_consistency_score},
         "layer_b": {"seller_average": round(seller_avg,2), "population_mean": round(population_mean,2), "population_std": round(population_std,2), "z_score": round(z_score,2), "population_label": population_label, "population_score": population_score},
         "layer_c": {"validity_label": validity_label, "validity_score": validity_score, "logical_behavior_flag": logical_behavior_flag},
         "final_behavior_analysis": {"final_behavior_risk_score": final_behavior_risk_score, "overall_behavior_label": overall_behavior_label, "repetitive_behavior_flag": repetitive_behavior_flag},
@@ -911,20 +911,28 @@ def analyze_seller_submission(request):
 
     # 4. Layer 1 — check duplicate from DB
     current_job = (
-        JobsHistory.objects
-        .filter(task=task, seller=seller_profile, status="pending")
-        .order_by("-startDate")
-        .first()
+    JobsHistory.objects
+    .filter(
+        task=task,
+        seller=seller_profile,
+        status__in=["pending", "submitted"]
     )
+    .order_by("-startDate")
+    .first()
+)
 
     is_duplicate_screenshot = 0
-    if current_job and current_job.proofSha256:
+
+    if current_job and current_job.proofSha256:  # ← proofSha256 is CharField
+                                              # empty string "" = falsy = skips check
+                                              # has value = truthy = runs check ✓
         duplicate_exists = (
-            JobsHistory.objects
-            .filter(proofSha256=current_job.proofSha256)
-            .exclude(id=current_job.id)
-            .exists()
-        )
+        JobsHistory.objects
+        .filter(proofSha256=current_job.proofSha256)
+        .exclude(proofSha256="")        # ← exclude empty strings ✓
+        .exclude(id=current_job.id)     # ← exclude current job ✓
+        .exists()
+    )
         is_duplicate_screenshot = 1 if duplicate_exists else 0
 
     layer1_result = {
@@ -986,9 +994,67 @@ def analyze_seller_submission(request):
     }
 
     # 9. Layer 3 — ML Prediction
+    # 9. Layer 3 — ML Prediction
     layer3_result = _run_ml_prediction(layer3_input)
 
-    # 10. Full response
+    # 10. Save to FraudAnalysisResult ─────────────────────────────
+    try:
+
+        fraud_result = FraudAnalysisResult.objects.create(
+            # Core references
+            job     = current_job,
+            task    = task,
+            seller  = seller_profile,
+
+            # Layer 1
+            is_duplicate_screenshot = bool(is_duplicate_screenshot),
+
+            # Layer 2 — Timing
+            completion_duration   = completion_time,
+            timing_risk_score     = timing_result["timing_risk_score"],
+            timing_classification = timing_result["timing_classification"],
+
+            # Layer 2 — Behavior
+            std_dev                  = flat_behavior["std_dev"],
+            z_score                  = flat_behavior["z_score"],
+            population_score         = flat_behavior["population_score"],
+            timing_consistency_score = flat_behavior["timing_consistency_score"],
+            validity_score           = flat_behavior["validity_score"],
+            logical_behavior_flag    = bool(flat_behavior["logical_behavior_flag"]),
+            repetitive_behavior_flag = bool(flat_behavior["repetitive_behavior_flag"]),
+            overall_behavior_label   = behavior_result["final_behavior_analysis"]["overall_behavior_label"],
+
+            # Layer 2 — Device/IP
+            ip_address           = ip_address or None,
+            device_id            = device_id,
+            device_seller_count  = flat_device["device_seller_count"],
+            ip_seller_count      = flat_device["ip_seller_count"],
+            device_sharing_score = flat_device["device_sharing_score"],
+            ip_reuse_score       = flat_device["ip_reuse_score"],
+            device_sharing_label = device_result["device_analysis"]["device_sharing_label"],
+            ip_reuse_label       = device_result["ip_analysis"]["ip_reuse_label"],
+
+            # Layer 3 — ML Result
+            prediction        = layer3_result["prediction"],
+            fraud_probability = layer3_result["fraud_probability"],
+            risk_level        = layer3_result["risk_level"],
+            is_fraud          = layer3_result["label"] == 1,
+            fraud_reasons     = layer3_result["fraud_reasons"],
+            suspicious_signals = layer3_result["suspicious_signals"],
+
+            # Seller snapshot
+            seller_type        = seller_type_label,
+            seller_age_days    = seller_age_days,
+            seller_trust_score = seller_trust_score,
+        )
+        JobsHistory.objects.filter(task_id=fraud_result.job_id).update(fraud_id=fraud_result.id)
+
+        print(f"[EngageX] FraudAnalysisResult saved for seller {seller_id} task {task_id}")
+    except Exception as e:
+        print(f"[EngageX] Failed to save FraudAnalysisResult: {e}")
+        # Don't crash the response if saving fails
+
+    # 11. Full response
     return JsonResponse({
         "sellerInfo": {
             "sellerId":            str(seller_id),

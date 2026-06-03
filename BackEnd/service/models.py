@@ -147,8 +147,8 @@ class JobsHistory(models.Model):
         ("passed", "Passed"),
         ("failed", "Failed"),
     )
-
     seller = models.ForeignKey(SellerProfile, on_delete=models.CASCADE, related_name="jobs")
+    fraud_id = models.IntegerField(default=0)
     task = models.ForeignKey(BuyerTasks, on_delete=models.CASCADE, related_name="jobs")
     progress = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     priceEarned = models.DecimalField(max_digits=10, decimal_places=2, default=0)
@@ -240,3 +240,6 @@ class TestAccount(models.Model):
     created_at = models.DateTimeField(auto_now=True)
     def __str__(self):
         return self.user_id
+
+
+

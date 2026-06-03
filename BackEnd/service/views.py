@@ -1525,7 +1525,7 @@ def approve_task(request, task_id):
         return JsonResponse({"error": "Task not found"}, status=404)
 
 #Job Assignment Logic will be adding here
-    return JsonResponse({"message": "Task approved successfully and amount deducted from buyer wallet"}, status=200)
+    return JsonResponse({"message": "Task approved successfully and amount deducted from buyer wallet","goal": task.goal}, status=200)
 
 
 @csrf_exempt
@@ -2055,3 +2055,128 @@ def disconnect_platform(request, platform):
         return JsonResponse({"message": f"{platform} disconnected"})
     except SocialAccount.DoesNotExist:
         return JsonResponse({"error": "Not connected"}, status=404)
+
+
+
+
+
+
+
+
+
+
+
+
+# detectfraud/views.py — add this view
+
+from detectfraud.models import FraudAnalysisResult
+from django.db.models import Count, Avg, Q
+
+@csrf_exempt
+def fraud_dashboard_api(request):
+    """
+    Returns all fraud analysis data for admin dashboard.
+    GET /fraud/dashboard/
+    """
+    if request.method != "GET":
+        return JsonResponse({"error": "GET only"}, status=405)
+
+    # ── Filters from query params ──────────────────────────────
+    risk_filter    = request.GET.get("risk_level", "")
+    prediction     = request.GET.get("prediction", "")
+    seller_id      = request.GET.get("seller_id", "")
+    task_id        = request.GET.get("task_id", "")
+    limit          = int(request.GET.get("limit", 50))
+
+    qs = FraudAnalysisResult.objects.select_related(
+        "seller__user", "task", "job"
+    ).order_by("-analyzed_at")
+
+    if risk_filter:
+        qs = qs.filter(risk_level=risk_filter.upper())
+    if prediction:
+        qs = qs.filter(prediction=prediction.upper())
+    if seller_id:
+        qs = qs.filter(seller__user_id=seller_id)
+    if task_id:
+        qs = qs.filter(task_id=task_id)
+
+    qs = qs[:limit]
+
+    # ── Stats summary ──────────────────────────────────────────
+    all_results = FraudAnalysisResult.objects.all()
+    total       = all_results.count()
+    fraud_count = all_results.filter(is_fraud=True).count()
+    legit_count = total - fraud_count
+    avg_prob    = all_results.aggregate(avg=Avg("fraud_probability"))["avg"] or 0
+
+    risk_breakdown = {
+        "LOW":      all_results.filter(risk_level="LOW").count(),
+        "MEDIUM":   all_results.filter(risk_level="MEDIUM").count(),
+        "HIGH":     all_results.filter(risk_level="HIGH").count(),
+        "CRITICAL": all_results.filter(risk_level="CRITICAL").count(),
+    }
+
+    # ── Serialize results ──────────────────────────────────────
+    results = []
+    for r in qs:
+        results.append({
+            "id":               r.id,
+            "analyzed_at":      r.analyzed_at.isoformat(),
+
+            # Seller
+            "seller_id":        r.seller.user_id,
+            "seller_name":      r.seller.user.get_full_name() or r.seller.user.username,
+            "seller_type":      r.seller_type,
+            "seller_age_days":  r.seller_age_days,
+            "seller_trust":     r.seller_trust_score,
+
+            # Task
+            "task_id":          r.task_id,
+            "task_title":       r.task.title,
+            "task_platform":    r.task.platform,
+            "task_type":        r.task.taskType,
+
+            # Layer 1
+            "is_duplicate_screenshot": r.is_duplicate_screenshot,
+
+            # Layer 2 — Timing
+            "completion_duration":   r.completion_duration,
+            "timing_risk_score":     r.timing_risk_score,
+            "timing_classification": r.timing_classification,
+
+            # Layer 2 — Behavior
+            "std_dev":                  r.std_dev,
+            "z_score":                  r.z_score,
+            "timing_consistency_score": r.timing_consistency_score,
+            "validity_score":           r.validity_score,
+            "repetitive_behavior_flag": r.repetitive_behavior_flag,
+            "overall_behavior_label":   r.overall_behavior_label,
+
+            # Layer 2 — Device
+            "device_seller_count":  r.device_seller_count,
+            "ip_seller_count":      r.ip_seller_count,
+            "device_sharing_score": r.device_sharing_score,
+            "ip_reuse_score":       r.ip_reuse_score,
+            "device_sharing_label": r.device_sharing_label,
+            "ip_reuse_label":       r.ip_reuse_label,
+
+            # Layer 3 — ML
+            "prediction":        r.prediction,
+            "fraud_probability": r.fraud_probability,
+            "risk_level":        r.risk_level,
+            "is_fraud":          r.is_fraud,
+            "fraud_reasons":     r.fraud_reasons,
+            "suspicious_signals": r.suspicious_signals,
+        })
+
+    return JsonResponse({
+        "summary": {
+            "total":       total,
+            "fraud":       fraud_count,
+            "legitimate":  legit_count,
+            "avg_probability": round(avg_prob, 2),
+            "risk_breakdown":  risk_breakdown,
+        },
+        "results": results,
+    })

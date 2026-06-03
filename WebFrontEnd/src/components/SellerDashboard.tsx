@@ -436,8 +436,23 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
       });
 
       const data = await response.json();
-
+      console.log("Task submission time ",timer)
       if (response.ok) {
+        const fraud_response = await fetch('http://127.0.0.1:8000/fraud/analyze-submission/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taskId: activeTask.id,
+            sellerId: userId,
+            completionTime: timer,
+            ipAddress: '',
+            deviceId: '',
+            userAgent: '',
+          }),
+        });
+
+        const fraud_data = await fraud_response.json();
+        console.log(fraud_data);
         alert(data.message || 'Task submitted successfully');
         setIsTaskDialogOpen(false);
         setActiveTask(null);
