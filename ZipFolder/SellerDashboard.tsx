@@ -315,21 +315,6 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
     connectedPlatforms.youtube,
   ]);
 
-  // Keep seller portal fresh.
-  // After admin approves/rejects a submitted proof, this polling lets the seller
-  // automatically receive the next available quota-based task without manual refresh.
-  useEffect(() => {
-    if (!userId) return;
-
-    const refreshInterval = window.setInterval(() => {
-      if (!isTaskDialogOpen && !youTubeDrawerOpen && !isSubmittingTask) {
-        fetchSellerData();
-      }
-    }, 5000);
-
-    return () => window.clearInterval(refreshInterval);
-  }, [userId, isTaskDialogOpen, youTubeDrawerOpen, isSubmittingTask]);
-
   useEffect(() => {
     let interval: any;
 
@@ -678,7 +663,7 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
                     </div>
                   ) : (
                     visibleAssignedTasks.map((task) => (
-                      <div key={task.jobId || task.id} className="border border-gray-200 rounded-xl p-4 hover:border-green-200 hover:shadow-md transition-all">
+                      <div key={task.id} className="border border-gray-200 rounded-xl p-4 hover:border-green-200 hover:shadow-md transition-all">
                         <div className="flex items-start justify-between mb-3">
                           <div className="flex items-center gap-3">
                             {getPlatformIcon(task.platform)}

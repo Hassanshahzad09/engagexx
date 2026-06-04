@@ -314,7 +314,7 @@ export default function AdminDashboard({ onLogout }) {
       console.error(error);
       alert('Server error');
     } finally {
-      setApprovingTaskIds((prev) => prev.filter((id) => id !== jobId));
+      setApprovingTaskIds((prev) => prev.filter((id) => id !== taskId));
     }
   };
 
@@ -830,10 +830,11 @@ export default function AdminDashboard({ onLogout }) {
   };
 
   const ProofReviewList = ({ proofs }) => {
-    // Only show proof submissions that still need proof approval.
-    // After Accept/Reject, backend already releases the seller back to the queue,
-    // so keeping accepted proofs visible here made the same job look duplicated/stuck.
-    const pendingReviewProofs = proofs.filter((proof) => proof.proofStatus === 'pending');
+    const pendingReviewProofs = proofs.filter((proof) => {
+      const isProofReviewed = proof.proofStatus === 'valid' || proof.proofStatus === 'invalid';
+      const isAuditReviewed = proof.auditStatus === 'passed' || proof.auditStatus === 'failed';
+      return !isProofReviewed || !isAuditReviewed;
+    });
 
     const normalizeProbability = (value) => {
       const numericValue = Number(value || 0);

@@ -120,8 +120,14 @@ const ConnectSocial: React.FC<Props> = ({
   const [hovered, setHovered] = useState<Platform | null>(null);
 
   useEffect(() => {
+    /*const interval = setInterval(() => {
     fetchConnections();
-  }, [sellerId]);
+  }, 3000);
+
+  return () => clearInterval(interval);
+*/
+    fetchConnections();
+  }, []);
 
   /*
   const fetchConnections = async () => {
@@ -151,10 +157,6 @@ const fetchConnections = async () => {
     );
 
     const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error || "Failed to fetch connections");
-    }
 
     // compare old vs new
     const hasChanged =
@@ -211,7 +213,6 @@ const fetchConnections = async () => {
       if (popup?.closed) {
         clearInterval(pollClosed);
         window.removeEventListener("message", handleMessage);
-        fetchConnections();
         setPending(null);
       }
     }, 500);

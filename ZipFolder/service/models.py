@@ -90,12 +90,6 @@ class SellerProfile(models.Model):
     avgCompletionTime = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     sucessRate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
-    # Queue/assignment fields used by the one-task-at-a-time dispatcher
-    is_online = models.BooleanField(default=False)
-    is_available = models.BooleanField(default=True)
-    queue_joined_at = models.DateTimeField(null=True, blank=True)
-    last_assigned_at = models.DateTimeField(null=True, blank=True)
-
 class BuyerTasks(models.Model):
     buyer = models.ForeignKey(BuyerProfile, on_delete=models.CASCADE, related_name="tasks")
     title = models.CharField(max_length=100, default="New Task")
@@ -121,42 +115,6 @@ class BuyerTasks(models.Model):
 
     def __str__(self):
         return f"{self.title} - {self.platform}"
-
-
-class JobRatingQuota(models.Model):
-    RATING_CHOICES = (
-        (1, "1 Star"),
-        (2, "2 Star"),
-        (3, "3 Star"),
-        (4, "4 Star"),
-        (5, "5 Star"),
-    )
-
-    task = models.ForeignKey(BuyerTasks, on_delete=models.CASCADE, related_name="rating_quotas")
-    rating = models.IntegerField(choices=RATING_CHOICES)
-
-    total_quota = models.PositiveIntegerField(default=0)
-    assigned_count = models.PositiveIntegerField(default=0)
-    completed_count = models.PositiveIntegerField(default=0)
-    rejected_count = models.PositiveIntegerField(default=0)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        unique_together = ("task", "rating")
-        indexes = [
-            models.Index(fields=["task", "rating"]),
-            models.Index(fields=["rating", "created_at"]),
-        ]
-
-    @property
-    def available_count(self):
-        return self.total_quota - self.assigned_count - self.completed_count
-
-    def __str__(self):
-        return f"Task {self.task_id} - Rating {self.rating} - Quota {self.total_quota}"
-
 
 
 class VirtualWallet(models.Model):
@@ -192,13 +150,11 @@ class JobsHistory(models.Model):
     seller = models.ForeignKey(SellerProfile, on_delete=models.CASCADE, related_name="jobs")
     fraud_id = models.IntegerField(default=0)
     task = models.ForeignKey(BuyerTasks, on_delete=models.CASCADE, related_name="jobs")
-    quota = models.ForeignKey(JobRatingQuota, on_delete=models.SET_NULL, null=True, blank=True, related_name="jobs")
     progress = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     priceEarned = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     status = models.CharField(max_length=20, default="pending")
     startDate = models.DateTimeField(auto_now_add=True)
     endDate = models.DateTimeField(null=True, blank=True)
-    lock_expires_at = models.DateTimeField(null=True, blank=True)
     completionTime = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     proofUrl = models.URLField(blank=True)
     proofStatus = models.CharField(max_length=20, choices=PROOF_STATUS_CHOICES, default="pending")
@@ -225,11 +181,7 @@ class JobsHistory(models.Model):
 )
 
     class Meta:
-        indexes = [
-            models.Index(fields=["seller", "status"]),
-            models.Index(fields=["task", "status"]),
-            models.Index(fields=["quota", "status"]),
-        ]
+        pass
 
 
 class SellerBehaviorLog(models.Model):
