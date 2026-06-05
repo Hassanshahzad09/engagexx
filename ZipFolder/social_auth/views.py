@@ -7,7 +7,7 @@ import os
 
 
 import json
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
 
@@ -16,10 +16,39 @@ from django.shortcuts import redirect
 from django.conf import settings
 from service.models import SocialAccount,User,BuyerProfile,SellerProfile,SocialAuth
 
+
+def _canonical_seller_user_id(raw_seller_id):
+    """
+    SocialAccount.sellerId MUST store the logged-in User.id of the seller.
+    Do not store/match SellerProfile.id here, otherwise Seller 1 can appear
+    connected inside Seller 2 when IDs overlap.
+    """
+    if raw_seller_id is None or str(raw_seller_id).strip() == "":
+        return None
+
+    raw_seller_id = int(raw_seller_id)
+
+    # Frontend sends userId, so this should normally pass.
+    if User.objects.filter(id=raw_seller_id, role="seller").exists():
+        return raw_seller_id
+
+    # Fallback only for old callers that accidentally send SellerProfile.id.
+    try:
+        return SellerProfile.objects.get(id=raw_seller_id).user_id
+    except SellerProfile.DoesNotExist:
+        return raw_seller_id
+
+
+def _build_state_with_seller(raw_seller_id, extra=None):
+    payload = {"seller_id": _canonical_seller_user_id(raw_seller_id)}
+    if extra:
+        payload.update(extra)
+    return base64.b64encode(json.dumps(payload).encode()).decode()
+
 def connect_facebook(request):
     base_url = "https://www.facebook.com/v18.0/dialog/oauth"
     seller_id = request.GET.get('seller_id')
-    state = base64.b64encode(json.dumps({'seller_id': seller_id}).encode()).decode()
+    state = _build_state_with_seller(seller_id)
     params = {
         "client_id": settings.FACEBOOK_CLIENT_ID,
         "redirect_uri": settings.FACEBOOK_REDIRECT_URI,
@@ -44,7 +73,7 @@ def facebook_callback(request):
 
     try:
         data = json.loads(base64.b64decode(state).decode())
-        seller_id = data.get('seller_id')
+        seller_id = _canonical_seller_user_id(data.get('seller_id'))
     except Exception as e:
         return HttpResponse(f"Invalid state: {str(e)}")
 
@@ -82,13 +111,15 @@ def facebook_callback(request):
     if not username or not social_id:
         return HttpResponse("Facebook did not return complete user data")
 
-    # Save account
-    SocialAccount.objects.create(
+    # Save/update account. One seller should have only one row per platform.
+    SocialAccount.objects.update_or_create(
         platform="facebook",
-        username=username,
-        social_id=social_id,
-        access_token=access_token,
-        sellerId=seller_id
+        sellerId=seller_id,
+        defaults={
+            "username": username,
+            "social_id": social_id,
+            "access_token": access_token,
+        }
     )
 
     return redirect("http://localhost:3000/connect-facebook")
@@ -101,7 +132,7 @@ def facebook_callback(request):
 def connect_instagram(request):
     base_url = "https://www.facebook.com/v18.0/dialog/oauth"
     seller_id = request.GET.get('seller_id')
-    state = base64.b64encode(json.dumps({'seller_id': seller_id}).encode()).decode()
+    state = _build_state_with_seller(seller_id)
     params = {
     "client_id": settings.INSTAGRAM_CLIENT_ID,
     "redirect_uri": settings.INSTAGRAM_REDIRECT_URI,
@@ -119,7 +150,7 @@ def instagram_callback(request):
     code = request.GET.get("code")
     state = request.GET.get('state')
     data = json.loads(base64.b64decode(state).decode())
-    seller_id = data.get('seller_id')
+    seller_id = _canonical_seller_user_id(data.get('seller_id'))
     if not code:
         print("❌ No code received")
         return redirect("http://localhost:3000/error?msg=no_code")
@@ -203,12 +234,14 @@ def instagram_callback(request):
 
             print("🔹 IG USER:", ig_user)
 
-            SocialAccount.objects.create(
-                social_id=ig_user.get("id"),
+            SocialAccount.objects.update_or_create(
                 platform="instagram",
-                username=ig_user.get("username"),
-                access_token=page_token,
-                sellerId=seller_id
+                sellerId=seller_id,
+                defaults={
+                    "social_id": ig_user.get("id"),
+                    "username": ig_user.get("username"),
+                    "access_token": page_token,
+                }
             )
 
             print("✅ SAVED TO DATABASE")
@@ -239,7 +272,7 @@ def connect_twitter(request):
     # =========================================
 
     state_payload = {
-        "seller_id": seller_id,
+        "seller_id": _canonical_seller_user_id(seller_id),
         "code_verifier": code_verifier
     }
 
@@ -290,7 +323,7 @@ def twitter_callback(request):
             base64.urlsafe_b64decode(state).decode()
         )
 
-        seller_id = decoded.get("seller_id")
+        seller_id = _canonical_seller_user_id(decoded.get("seller_id"))
         code_verifier = decoded.get("code_verifier")
 
         print("SELLER:", seller_id)
@@ -344,12 +377,14 @@ def twitter_callback(request):
     # SAVE TO DB (NO UPDATE, ALWAYS INSERT)
     # =========================================
 
-    SocialAccount.objects.create(
-        social_id=user_data.get("id"),
+    SocialAccount.objects.update_or_create(
         platform="twitter",
-        username=user_data.get("username"),
-        access_token=access_token,
-        sellerId=seller_id
+        sellerId=seller_id,
+        defaults={
+            "social_id": user_data.get("id"),
+            "username": user_data.get("username"),
+            "access_token": access_token,
+        }
     )
 
     return redirect("http://localhost:3000/success")
@@ -360,7 +395,7 @@ def twitter_callback(request):
 def connect_youtube(request):
     base_url = "https://accounts.google.com/o/oauth2/v2/auth"
     seller_id = request.GET.get('seller_id')
-    state = base64.b64encode(json.dumps({'seller_id': seller_id}).encode()).decode()
+    state = _build_state_with_seller(seller_id)
     params = {
         "client_id": settings.YOUTUBE_CLIENT_ID,
         "redirect_uri": settings.YOUTUBE_REDIRECT_URI,
@@ -379,7 +414,7 @@ def youtube_callback(request):
     code = request.GET.get("code")
     state = request.GET.get("state")
     data = json.loads(base64.b64decode(state).decode())
-    seller_id = data.get('seller_id')
+    seller_id = _canonical_seller_user_id(data.get('seller_id'))
     
     if not code:
         return redirect("http://localhost:3000/error?msg=no_code")
@@ -427,13 +462,15 @@ def youtube_callback(request):
     username = channel["snippet"]["title"]
     channel_id = channel["id"]
 
-    # 🔹 Save in DB
-    SocialAccount.objects.create(
-        social_id=channel_id,
+    # 🔹 Save/update in DB
+    SocialAccount.objects.update_or_create(
         platform="youtube",
-        username=username,
-        access_token=access_token,
-        sellerId=seller_id
+        sellerId=seller_id,
+        defaults={
+            "social_id": channel_id,
+            "username": username,
+            "access_token": access_token,
+        }
     )
 
     return redirect("http://localhost:3000/connect-youtube?success=true")

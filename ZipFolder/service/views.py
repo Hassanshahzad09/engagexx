@@ -2,21 +2,23 @@ import json
 import base64
 import hashlib
 import uuid
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 import requests
 from django.conf import settings
 from django.contrib.auth.hashers import check_password, make_password
-from django.db.models import Count, Sum, Q
+from django.db.models import Count, Sum, Q, F, Max, Case, When, Value, IntegerField
 from django.db.models.functions import TruncMonth
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from BackEnd.utils import assign_jobs_round_robin
-from .models import BuyerProfile, BuyerTasks, EasypaisaTransaction, RatingIndexes, SellerBehaviorLog, SellerProfile, SellerWithdrawalRequest, User,JobsHistory,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
+from .models import BuyerProfile, BuyerTasks, EasypaisaTransaction, RatingIndexes, SellerBehaviorLog, SellerProfile, SellerWithdrawalRequest, User,JobsHistory,JobRatingQuota,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
 from .seller_rating import calculate_seller_rating, rating_dataset_summary, update_seller_rating
 from django.db import transaction
 from django.views.decorators.http import require_http_methods
 
+from django.db.models import F, Max
 
 def get_easypaisa_credentials_header():
     raw_credentials = f"{settings.EASYPAISA_USERNAME}:{settings.EASYPAISA_PASSWORD}"
@@ -645,7 +647,7 @@ def admin_active_tasks(request):
         approval_status="approved"
     ).exclude(
         status="completed"
-    ).select_related("buyer__user").prefetch_related("jobs")
+    ).select_related("buyer__user").prefetch_related("jobs").distinct()
 
     data = []
     for task in tasks:
@@ -889,6 +891,7 @@ def admin_seller_monitor(request):
 
     proof_jobs = (
         JobsHistory.objects
+        .filter(status="submitted", proofStatus="pending")
         .filter(Q(proofUrl__gt="") | Q(proofImage__isnull=False))
         .select_related("seller__user", "task")
         .order_by("-endDate", "-startDate")[:100]
@@ -933,32 +936,493 @@ def get_seller_profile_from_user_id(user_id):
 
 
 def assign_task_to_available_sellers(task):
-    sellers = SellerProfile.objects.all()
-    assigned_count = 0
+    """
+    Kept for old code compatibility only.
+    New flow does NOT bulk-create JobsHistory rows.
+    Jobs are created lazily from JobRatingQuota when a seller requests tasks.
+    """
+    return 0
 
-    for seller in sellers:
-        _, created = JobsHistory.objects.get_or_create(
-            task=task,
-            seller=seller,
-            defaults={"taskId": task.id, "status": "pending"},
-        )
-        if created:
-            assigned_count += 1
 
-    return assigned_count
+def _normalize_platform_name(platform):
+    """
+    Normalize platform names so Instagram/insta and Twitter/X/x match correctly.
+    """
+    value = (platform or "").strip().lower()
+
+    if value in ["instagram", "insta"]:
+        return "instagram"
+
+    if value in ["twitter", "x", "twitter/x", "x.com"]:
+        return "twitter"
+
+    if value in ["facebook", "fb"]:
+        return "facebook"
+
+    if value in ["youtube", "yt"]:
+        return "youtube"
+
+    return value
 
 
 def get_connected_platforms_for_seller(seller_profile):
-    seller_ids = {seller_profile.user_id, seller_profile.id}
+    """
+    Returns platforms connected by THIS exact seller account only.
+
+    IMPORTANT:
+    SocialAccount.sellerId stores the seller user's User.id, not SellerProfile.id.
+    Never check both SellerProfile.id and User.id here, because IDs can overlap
+    and Seller 1's connection can wrongly appear on Seller 2.
+    """
     platforms = SocialAccount.objects.filter(
-        sellerId__in=seller_ids
+        sellerId=seller_profile.user_id
     ).values_list("platform", flat=True)
 
     return {
-        (platform or "").strip().lower()
+        _normalize_platform_name(platform)
         for platform in platforms
         if platform
     }
+
+
+def _get_seller_connected_platforms(seller_profile):
+    """
+    Get platforms connected to this exact seller account only.
+    This is a helper alias used by the seller priority checks.
+    """
+    return get_connected_platforms_for_seller(seller_profile)
+
+
+def _seller_has_connected_platform(seller_profile, task_platform):
+    """
+    Check if seller has connected the platform required by the task.
+    """
+    connected_platforms = _get_seller_connected_platforms(seller_profile)
+    required_platform = _normalize_platform_name(task_platform)
+
+    return required_platform in connected_platforms
+
+
+def _seller_pending_buyer_ids(seller_profile):
+    """
+    Buyer IDs for which this seller currently has an unsubmitted assigned job.
+
+    Rule:
+    - submitted proof does NOT block the seller globally
+    - only pending/unsubmitted jobs block another task from the same buyer
+    - seller may still receive tasks from other buyers
+    """
+    return set(
+        JobsHistory.objects.filter(
+            seller=seller_profile,
+            status="pending",
+            task__approval_status="approved",
+            task__virtual_wallet__status="holding",
+        ).values_list("task__buyer_id", flat=True)
+    )
+
+
+def _seller_has_unsubmitted_job_from_same_buyer(seller_profile, buyer_id):
+    """
+    Seller should not receive another unsubmitted/open job from the same buyer.
+
+    In your current flow, 'pending' means assigned to seller but not submitted yet.
+    'assigned' is included for safety if any older rows use that status.
+    """
+    return JobsHistory.objects.filter(
+        seller=seller_profile,
+        task__buyer_id=buyer_id,
+        status__in=["assigned", "pending"],
+        task__approval_status="approved",
+        task__virtual_wallet__status="holding",
+    ).exists()
+
+
+def _seller_has_pending_review_for_same_task(seller_profile, task):
+    """
+    Final rule:
+    Seller cannot receive the SAME BuyerTask again while his previous proof
+    for that same BuyerTask is waiting for admin approval/rejection.
+
+    This does NOT block tasks from other buyers/tasks.
+    """
+    return JobsHistory.objects.filter(
+        seller=seller_profile,
+        task=task,
+        status="submitted",
+        proofStatus="pending",
+    ).exists()
+
+
+def _seller_rejected_task_twice(seller_profile, task):
+    """
+    If seller has already rejected/invalid proof twice for the same buyer task,
+    do not assign this same task to him again.
+    """
+    return JobsHistory.objects.filter(
+        seller=seller_profile,
+        task=task,
+    ).filter(
+        Q(status="rejected") | Q(proofStatus="invalid")
+    ).count() >= 2
+
+
+def _serialize_seller_job(job):
+    task = job.task
+    goal = float(task.goal or 0)
+    progressed = float(task.progressed or 0)
+    price = float(task.pricePerAction or 0)
+    remaining = goal - progressed
+
+    return {
+        "id": task.id,
+        "jobId": job.id,
+        "title": task.title,
+        "platform": (task.platform or "").strip().title(),
+        "type": (task.taskType or "").title(),
+        "url": task.url,
+        "price": price,
+        "remaining": max(remaining, 0),
+        "total": goal,
+        "timeEstimate": "2 min",
+        "difficulty": "Easy",
+        "status": "assigned" if job.status == "pending" else job.status,
+    }
+
+
+def _seller_priority_tuple(seller_profile):
+    """
+    Lower tuple = higher seller priority.
+
+    Priority logic:
+    1. Sellers who never received a task get first chance.
+    2. Then sellers with the oldest last assignment get priority.
+    3. Then sellers who waited longer in queue get priority.
+    4. Higher trust score wins only when fairness is equal.
+    """
+
+    now = timezone.now()
+
+    if seller_profile.last_assigned_at is None:
+        last_assigned_rank = 0
+        last_assigned_time = timezone.datetime.min.replace(
+            tzinfo=timezone.get_current_timezone()
+        )
+    else:
+        last_assigned_rank = 1
+        last_assigned_time = seller_profile.last_assigned_at
+
+    queue_time = seller_profile.queue_joined_at or now
+
+    try:
+        trust_score = Decimal(seller_profile.trust_score or 0)
+    except Exception:
+        trust_score = Decimal("0")
+
+    return (
+        last_assigned_rank,
+        last_assigned_time,
+        queue_time,
+        -trust_score,
+        seller_profile.id,
+    )
+
+
+def _normalize_task_type(task_type):
+    """
+    Normalize task type names so Like/likes/follow/followers etc match safely.
+    """
+    return (task_type or "").strip().lower().replace("-", " ").replace("_", " ")
+
+
+def _is_non_repeatable_task(task):
+    """
+    These task types should not be assigned again to the same seller
+    because the seller cannot naturally perform them twice.
+
+    Example:
+    - Like again means unlike + like again
+    - Follow again means unfollow + follow again
+    - Subscribe again means unsubscribe + subscribe again
+    - Comment again with same task can create spam/fake behavior
+    """
+
+    task_type = _normalize_task_type(task.taskType)
+
+    non_repeatable_keywords = [
+        "like",
+        "likes",
+        "follow",
+        "follows",
+        "follower",
+        "followers",
+        "subscribe",
+        "subscriber",
+        "subscribers",
+        "comment",
+        "comments",
+    ]
+
+    return any(keyword == task_type or keyword in task_type for keyword in non_repeatable_keywords)
+
+
+def _seller_already_attempted_same_task(seller_profile, task):
+    """
+    Final rule:
+    For non-repeatable tasks, if this seller already got this BuyerTask once,
+    never assign this same BuyerTask to this same seller again.
+
+    This includes:
+    - pending
+    - submitted
+    - completed
+    - rejected
+
+    Because even rejected proof does not mean seller should like/follow again.
+    """
+
+    if not _is_non_repeatable_task(task):
+        return False
+
+    return JobsHistory.objects.filter(
+        seller=seller_profile,
+        task=task
+    ).exists()
+
+
+def _seller_is_eligible_for_quota(seller_profile, quota):
+    """
+    Check if this seller is eligible for this quota.
+    """
+    task = quota.task
+
+    if seller_profile.ratings != quota.rating:
+        return False
+
+    if not getattr(seller_profile, "is_online", False):
+        return False
+
+    if not _seller_has_connected_platform(seller_profile, task.platform):
+        return False
+
+    # One open/unsubmitted task from same buyer at a time.
+    if _seller_has_unsubmitted_job_from_same_buyer(seller_profile, task.buyer_id):
+        return False
+
+    # Seller cannot receive same BuyerTask again while previous proof is pending review.
+    if _seller_has_pending_review_for_same_task(seller_profile, task):
+        return False
+
+    # FINAL IMPORTANT RULE:
+    # For like/follow/subscribe/comment tasks,
+    # same seller should never receive the same BuyerTask again.
+    if _seller_already_attempted_same_task(seller_profile, task):
+        return False
+
+    # Old protection:
+    # if seller rejected twice on same task, skip this task.
+    if _seller_rejected_task_twice(seller_profile, task):
+        return False
+
+    return True
+
+def _get_highest_priority_seller_for_quota(quota):
+    """
+    Find the seller who deserves this quota the most right now.
+
+    This prevents the fastest-refreshing seller from taking all jobs.
+    """
+    possible_sellers = (
+        SellerProfile.objects
+        .filter(
+            ratings=quota.rating,
+            is_online=True,
+        )
+        .select_related("user")
+    )
+
+    eligible_sellers = []
+
+    for seller in possible_sellers:
+        if _seller_is_eligible_for_quota(seller, quota):
+            eligible_sellers.append(seller)
+
+    if not eligible_sellers:
+        return None
+
+    eligible_sellers.sort(key=_seller_priority_tuple)
+    return eligible_sellers[0]
+
+
+def _get_next_quota_for_seller(seller_profile, connected_platforms, blocked_buyer_ids=None):
+    """
+    Pick next quota fairly for this seller.
+
+    Final assignment rules:
+    - Match seller rating.
+    - Match this exact seller's connected OAuth platforms.
+    - Seller can receive jobs from different buyers.
+    - Seller cannot receive another unsubmitted/open job from same buyer.
+    - Seller cannot receive same BuyerTask again while previous proof
+      for same BuyerTask is pending admin review.
+    - For like/follow/subscribe/comment tasks, seller cannot receive
+      the same BuyerTask again ever.
+    - Seller rejected twice on same BuyerTask will not receive it again.
+    - New/idle sellers get priority over recently assigned sellers.
+    - Fast-refresh seller cannot steal all jobs.
+    """
+
+    normalized_platforms = {
+        _normalize_platform_name(platform)
+        for platform in connected_platforms
+        if platform
+    }
+
+    if not normalized_platforms:
+        return None
+
+    blocked_buyer_ids = set(blocked_buyer_ids or [])
+
+    candidate_quotas = (
+        JobRatingQuota.objects
+        .select_for_update()
+        .select_related("task", "task__buyer")
+        .filter(
+            rating=seller_profile.ratings,
+            task__approval_status="approved",
+            task__status__in=["active", "in_progress"],
+            task__virtual_wallet__status="holding",
+            total_quota__gt=F("assigned_count") + F("completed_count"),
+        )
+        .annotate(last_served_at=Max("jobs__startDate"))
+    )
+
+    valid_quotas = []
+
+    for quota in candidate_quotas:
+        task = quota.task
+        task_platform = _normalize_platform_name(task.platform)
+
+        # Seller must have connected account for this platform.
+        if task_platform not in normalized_platforms:
+            continue
+
+        # One pending/unsubmitted task per buyer at a time.
+        if task.buyer_id in blocked_buyer_ids:
+            continue
+
+        # Same BuyerTask pending review rule.
+        if _seller_has_pending_review_for_same_task(seller_profile, task):
+            continue
+
+        # FINAL IMPORTANT RULE:
+        # If seller already received this same BuyerTask once,
+        # do not assign it again for like/follow/subscribe/comment tasks.
+        if _seller_already_attempted_same_task(seller_profile, task):
+            continue
+
+        # Rejected twice rule.
+        if _seller_rejected_task_twice(seller_profile, task):
+            continue
+
+        # Priority rule:
+        # Even if this seller requested first, only assign this quota
+        # if this seller is currently the highest priority eligible seller.
+        highest_priority_seller = _get_highest_priority_seller_for_quota(quota)
+
+        if not highest_priority_seller:
+            continue
+
+        if highest_priority_seller.id != seller_profile.id:
+            continue
+
+        valid_quotas.append(quota)
+
+    if not valid_quotas:
+        return None
+
+    def quota_priority(quota):
+        """
+        Lower tuple = higher quota priority.
+
+        Priority:
+        1. Quota with lower served count first.
+        2. Never-served quota first.
+        3. Least recently served quota next.
+        4. Newer task gets slight priority if everything else is equal.
+        """
+        total_served = (quota.assigned_count or 0) + (quota.completed_count or 0)
+
+        if quota.last_served_at is None:
+            last_served_rank = 0
+            last_served_time = timezone.datetime.min.replace(
+                tzinfo=timezone.get_current_timezone()
+            )
+        else:
+            last_served_rank = 1
+            last_served_time = quota.last_served_at
+
+        created_time = quota.created_at or timezone.now()
+
+        return (
+            total_served,
+            last_served_rank,
+            last_served_time,
+            -created_time.timestamp(),
+            quota.id,
+        )
+
+    valid_quotas.sort(key=quota_priority)
+
+    return valid_quotas[0]
+
+
+def _create_next_job_for_seller(seller_profile, connected_platforms, blocked_buyer_ids=None):
+    """
+    Lazy assignment:
+    - creates only ONE JobsHistory row per call
+    - does not wait for admin approval of submitted proofs globally
+    - blocks only buyers where seller already has a pending/unsubmitted job
+    - blocks the same BuyerTask while seller's previous proof is pending admin review
+    - respects seller priority so new/idle sellers get fair opportunity
+    """
+    if not connected_platforms:
+        return None
+
+    quota = _get_next_quota_for_seller(
+        seller_profile,
+        connected_platforms,
+        blocked_buyer_ids=blocked_buyer_ids,
+    )
+
+    if not quota:
+        seller_profile.is_available = True
+        seller_profile.save(update_fields=["is_available"])
+        return None
+
+    job = JobsHistory.objects.create(
+        seller=seller_profile,
+        task=quota.task,
+        quota=quota,
+        taskId=quota.task.id,
+        status="pending",
+        proofStatus="pending",
+        auditStatus="not_checked",
+        priceEarned=quota.task.pricePerAction or Decimal("0.00"),
+        lock_expires_at=timezone.now() + timedelta(minutes=30),
+    )
+
+    quota.assigned_count += 1
+    quota.save(update_fields=["assigned_count", "updated_at"])
+
+    seller_profile.is_online = True
+    # Boolean availability is no longer a hard global lock; seller may still get other buyers' jobs.
+    seller_profile.is_available = True
+    seller_profile.last_assigned_at = timezone.now()
+    seller_profile.queue_joined_at = timezone.now()
+    seller_profile.save(update_fields=["is_online", "is_available", "last_assigned_at", "queue_joined_at"])
+
+    return job
 
 
 def approved_tasks(request):
@@ -978,42 +1442,61 @@ def approved_tasks(request):
     if not connected_platforms:
         return JsonResponse({"tasks": []}, status=200)
 
-    jobs = JobsHistory.objects.filter(
-        status="pending",
-        seller=seller_profile,
-        task__approval_status="approved",
-        task__virtual_wallet__status="holding",
-    ).select_related("task")
+    with transaction.atomic():
+        seller_profile = SellerProfile.objects.get(id=seller_profile.id)
+
+        # Show only pending/unsubmitted assigned jobs to the seller.
+        # Submitted proofs are with admin, but they no longer block jobs from other buyers.
+        active_jobs = list(
+            JobsHistory.objects
+            .filter(
+                seller=seller_profile,
+                status="pending",
+                task__approval_status="approved",
+                task__virtual_wallet__status="holding",
+            )
+            .select_related("task", "task__buyer")
+            .order_by("startDate", "id")
+        )
+
+        blocked_buyer_ids = {job.task.buyer_id for job in active_jobs if job.task_id}
+
+        now = timezone.now()
+        was_offline = not getattr(seller_profile, "is_online", False)
+
+        seller_profile.is_online = True
+        seller_profile.is_available = True
+
+        # If seller just came online or has no queue time, start a fresh queue wait time.
+        if was_offline or seller_profile.queue_joined_at is None:
+            seller_profile.queue_joined_at = now
+
+        seller_profile.save(update_fields=["is_online", "is_available", "queue_joined_at"])
+
+        # Create ONE more task per poll/call, but only from a buyer that is not already pending.
+        # This lets a seller receive tasks from multiple buyers without waiting for admin review,
+        # while still preventing the same seller from repeatedly taking the same buyer/task.
+        new_job = _create_next_job_for_seller(
+            seller_profile,
+            connected_platforms,
+            blocked_buyer_ids=blocked_buyer_ids,
+        )
+        if new_job:
+            active_jobs.append(new_job)
 
     data = []
-
-    for job in jobs:
-        task = job.task
-        platform = (task.platform or "").strip()
-        if platform.lower() not in connected_platforms:
+    for job in active_jobs:
+        if not job or job.status != "pending":
             continue
 
-        goal = float(task.goal or 0)
-        progressed = float(task.progressed or 0)
-        price = float(task.pricePerAction or 0)
-        remaining = goal - progressed
+        platform = _normalize_platform_name(job.task.platform)
+        if platform not in connected_platforms:
+            continue
 
-        data.append({
-            "id": task.id,
-            "jobId": job.id,
-            "title": task.title,
-            "platform": platform.title(),
-            "type": (task.taskType or "").title(),
-            "url": task.url,
-            "price": price,
-            "remaining": max(remaining, 0),
-            "total": goal,
-            "timeEstimate": "2 min",
-            "difficulty": "Easy",
-            "status": "assigned",
-        })
+        data.append(_serialize_seller_job(job))
 
     return JsonResponse({"tasks": data}, status=200)
+
 
 def calculate_file_sha256(uploaded_file):
     sha256 = hashlib.sha256()
@@ -1061,6 +1544,12 @@ def approve_seller_job(job, task, seller_profile, virtual_wallet, payment_amount
         "endDate",
     ])
 
+    if job.quota_id:
+        quota = JobRatingQuota.objects.select_for_update().get(id=job.quota_id)
+        quota.assigned_count = max(0, quota.assigned_count - 1)
+        quota.completed_count += 1
+        quota.save(update_fields=["assigned_count", "completed_count", "updated_at"])
+
     task.progressed = (task.progressed or Decimal("0.00")) + Decimal("1.00")
     if task.progressed >= task.goal:
         task.status = "completed"
@@ -1081,6 +1570,10 @@ def approve_seller_job(job, task, seller_profile, virtual_wallet, payment_amount
         type="escrow_release",
         description=f"Seller job approved: {task.title}",
     )
+
+    seller_profile.is_available = True
+    seller_profile.queue_joined_at = timezone.now()
+    seller_profile.save(update_fields=["is_available", "queue_joined_at"])
 
     return update_seller_rating(seller_profile)
 
@@ -1218,6 +1711,12 @@ def submit_task(request):
                 "endDate",
             ])
 
+            # Seller has submitted proof, so he is free for new assignment.
+            # Admin review will happen later, but it should not globally block the seller.
+            seller_profile.is_available = True
+            seller_profile.queue_joined_at = timezone.now()
+            seller_profile.save(update_fields=["is_available", "queue_joined_at"])
+
             behavior_log = create_seller_behavior_log(request, job)
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
@@ -1350,6 +1849,17 @@ def review_seller_proof(request, job_id):
                 job.proofReviewedDate = timezone.now()
                 job.status = "rejected"
                 job.save(update_fields=["proofStatus", "proofReviewedDate", "status"])
+
+                if job.quota_id:
+                    quota = JobRatingQuota.objects.select_for_update().get(id=job.quota_id)
+                    quota.assigned_count = max(0, quota.assigned_count - 1)
+                    quota.rejected_count += 1
+                    quota.save(update_fields=["assigned_count", "rejected_count", "updated_at"])
+
+                job.seller.is_available = True
+                job.seller.queue_joined_at = timezone.now()
+                job.seller.save(update_fields=["is_available", "queue_joined_at"])
+
                 rating_data = update_seller_rating(job.seller)
                 message = "Seller proof rejected"
     except JobsHistory.DoesNotExist:
@@ -1875,172 +2385,95 @@ def getRatingIndexes(request):
 
 @csrf_exempt
 def assign_jobs_api(request):
-    print("API HIT")
-
+    """
+    Called after admin approves a BuyerTasks row and ML returns rating-wise allocation.
+    This endpoint now creates JobRatingQuota rows only.
+    It does NOT directly assign JobsHistory rows to sellers.
+    """
     if request.method != "POST":
         return JsonResponse({"error": "Only POST allowed"}, status=405)
 
     try:
         body = json.loads(request.body)
-
-        sellers_data = body.get("sellers", [])
         jobs_data = body.get("jobs", {})
         task_id = body.get("taskId")
 
+        if not task_id:
+            return JsonResponse({"error": "taskId is required"}, status=400)
+
         task = BuyerTasks.objects.get(id=task_id)
-        if JobsHistory.objects.filter(task=task).exists():
-            return JsonResponse({"status": "Jobs already assigned for this task"}, status=200)
-
-        # ✅ Step 1: Validate & normalize sellers
-        valid_sellers = []
-
-        for seller in sellers_data:
-            try:
-                seller_id = int(seller.get("id"))
-                rating = int(seller.get("Rating"))
-                valid_sellers.append({"id": seller_id, "Rating": rating})
-            except:
-                continue  # skip bad data
-
-        # ✅ Step 2: group sellers by rating
-        sellers_by_rating = {
-            "rate1": [],
-            "rate2": [],
-            "rate3": [],
-            "rate4": [],
-            "rate5": []
-        }
-
-        for seller in valid_sellers:
-            rating_key = f"rate{seller['Rating']}"
-            if rating_key in sellers_by_rating:
-                sellers_by_rating[rating_key].append(seller["id"])
-
-        print("Sellers by rating:", sellers_by_rating)
-        print("Jobs data:", jobs_data)
 
         with transaction.atomic():
-            tracker, _ = RatingIndexes.objects.select_for_update().get_or_create(id=1)
+            task = BuyerTasks.objects.select_for_update().get(id=task_id)
 
-            for rating_key in sellers_by_rating.keys():
-                seller_ids = sellers_by_rating[rating_key]
-                jobs_count = int(jobs_data.get(rating_key, 0))
+            if JobRatingQuota.objects.filter(task=task).exists():
+                return JsonResponse({"status": "Quota already created for this task"}, status=200)
 
-                if not seller_ids or jobs_count == 0:
+            total_created_quota = 0
+
+            for rating in range(1, 6):
+                rating_key = f"rate{rating}"
+                try:
+                    quota_count = int(float(jobs_data.get(rating_key, 0) or 0))
+                except (TypeError, ValueError):
+                    quota_count = 0
+
+                if quota_count <= 0:
                     continue
 
-                # ✅ Step 3: fetch ONLY valid sellers from DB
-                db_sellers = list(
-                    SellerProfile.objects.filter(id__in=seller_ids).values_list("id", flat=True)
+                JobRatingQuota.objects.create(
+                    task=task,
+                    rating=rating,
+                    total_quota=quota_count,
+                    assigned_count=0,
+                    completed_count=0,
+                    rejected_count=0,
                 )
+                total_created_quota += quota_count
 
-                if not db_sellers:
-                    print(f"No valid sellers in DB for {rating_key}")
-                    continue
+            task.status = "active"
+            task.save(update_fields=["status"])
 
-                jobs_count = min(jobs_count, len(db_sellers))
-                last_index = getattr(tracker, rating_key)
+        return JsonResponse({
+            "status": "Job quotas created successfully",
+            "taskId": task.id,
+            "total_created_quota": total_created_quota,
+        }, status=200)
 
-                assigned_ids, new_index = assign_jobs_round_robin(
-                    db_sellers,
-                    jobs_count,
-                    last_index
-                )
-                assigned_ids = list(dict.fromkeys(assigned_ids))
-
-                print("---- DEBUG ----")
-                print("Rating:", rating_key)
-                print("DB Sellers:", db_sellers)
-                print("Jobs Count:", jobs_count)
-                print("Assigned IDs:", assigned_ids)
-                print("----------------")
-
-                # ✅ Step 4: create jobs safely
-                jobs_to_create = [
-                    JobsHistory(
-                        seller_id=seller_id,
-                        task=task,
-                        taskId=task_id
-                    )
-                    for seller_id in assigned_ids
-                ]
-
-                print("Creating jobs:", len(jobs_to_create))
-
-                # 🔥 SAFE INSERT
-                for job in jobs_to_create:
-                    job.save()
-
-                # update index
-                setattr(tracker, rating_key, new_index)
-
-            tracker.save()
-
-        return JsonResponse({"status": "Jobs assigned successfully"}, status=200)
-
+    except BuyerTasks.DoesNotExist:
+        return JsonResponse({"error": "Buyer task not found"}, status=404)
     except Exception as e:
-        print("ERROR:", str(e))
+        print("ASSIGN JOB QUOTA ERROR:", str(e))
         return JsonResponse({"error": str(e)}, status=500)
-
-
-
-
-
 
 
 
 def connections_status(request):
     platforms = ['facebook', 'instagram', 'twitter', 'youtube']
     seller_id = request.GET.get("sellerId")
+
+    if not seller_id:
+        return JsonResponse({"error": "sellerId is required"}, status=400)
+
+    try:
+        seller = get_seller_profile_from_user_id(seller_id)
+        canonical_seller_user_id = seller.user_id
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
+
     result = {}
-
     for platform in platforms:
-        try:
-            account = SocialAccount.objects.get(platform=platform, sellerId=seller_id)
-            token = account.access_token
-            is_valid = False
+        account = (
+            SocialAccount.objects
+            .filter(platform=platform, sellerId=canonical_seller_user_id)
+            .order_by("-id")
+            .first()
+        )
 
-            if platform == 'facebook':
-                response = requests.get(
-                    "https://graph.facebook.com/me",
-                    params={"access_token": token}
-                ).json()
-                is_valid = "id" in response
-
-            elif platform == 'instagram':
-                response = requests.get(
-                    "https://graph.facebook.com/me",
-                    params={"access_token": token}
-                ).json()
-                is_valid = "id" in response
-
-            elif platform == 'twitter':
-                response = requests.get(
-                    "https://api.twitter.com/2/users/me",
-                    headers={"Authorization": f"Bearer {token}"}
-                ).json()
-                is_valid = "data" in response
-
-            elif platform == 'youtube':
-                response = requests.get(
-                    "https://www.googleapis.com/youtube/v3/channels",
-                    params={"part": "snippet", "mine": "true"},
-                    headers={"Authorization": f"Bearer {token}"}
-                ).json()
-                is_valid = "items" in response and len(response["items"]) > 0
-
-            if is_valid:
-                result[platform] = {
-                    "connected": True,
-                    "username": account.username,
-                }
-            else:
-                print("InvalidToken")
-                account.delete()
-                result[platform] = {"connected": False, "username": None}
-
-        except SocialAccount.DoesNotExist:
-            result[platform] = {"connected": False, "username": None}
+        result[platform] = {
+            "connected": bool(account),
+            "username": account.username if account else None,
+        }
 
     return JsonResponse(result)
 
@@ -2050,9 +2483,12 @@ def connections_status(request):
 def disconnect_platform(request, platform):
     try:
         seller_id = request.GET.get("sellerId")
-        account = SocialAccount.objects.get(platform=platform, sellerId=seller_id)
+        seller = get_seller_profile_from_user_id(seller_id)
+        account = SocialAccount.objects.get(platform=platform, sellerId=seller.user_id)
         account.delete()
         return JsonResponse({"message": f"{platform} disconnected"})
+    except SellerProfile.DoesNotExist:
+        return JsonResponse({"error": "Seller profile not found"}, status=404)
     except SocialAccount.DoesNotExist:
         return JsonResponse({"error": "Not connected"}, status=404)
 

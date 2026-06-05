@@ -1,2 +1,3 @@
-2026/06/03-21:30:56.733 ecc Creating DB D:\Programming\FinalYearProject\EngageX\BackEnd\x_google_login_profile\Default\shared_proto_db\metadata since it was missing.
-2026/06/03-21:30:56.762 ecc Reusing MANIFEST D:\Programming\FinalYearProject\EngageX\BackEnd\x_google_login_profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2026/06/05-18:13:08.662 6de4 Reusing MANIFEST D:\Programming\FinalYearProject\EngageX\BackEnd\x_google_login_profile\Default\shared_proto_db\metadata/MANIFEST-000001
+2026/06/05-18:13:08.664 6de4 Recovering log #3
+2026/06/05-18:13:08.665 6de4 Reusing old log D:\Programming\FinalYearProject\EngageX\BackEnd\x_google_login_profile\Default\shared_proto_db\metadata/000003.log 

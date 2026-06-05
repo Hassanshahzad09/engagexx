@@ -1,26 +1,18 @@
 import asyncio
-import json
 from pathlib import Path
-from django.http import JsonResponse
 from playwright.async_api import async_playwright
 
 
-from playwright.async_api import async_playwright
-from pathlib import Path
-
-
-SESSION_FILE = "twitter_session.json"
 USER_DATA_DIR = "x_google_login_profile"
 
 
-async def save_twitter_session():
+async def open_persistent_twitter_context(p):
     """
-    Opens real Chrome-like persistent browser.
-    Use this only one time to login with Google.
+    Opens persistent browser profile.
+    This keeps Google/X login saved.
     """
 
-    async with async_playwright() as p:
-
+    try:
         context = await p.chromium.launch_persistent_context(
             user_data_dir=USER_DATA_DIR,
             headless=False,
@@ -29,31 +21,75 @@ async def save_twitter_session():
             args=[
                 "--disable-blink-features=AutomationControlled",
                 "--disable-popup-blocking",
-                "--start-maximized"
-            ]
+                "--start-maximized",
+            ],
         )
+
+        return context
+
+    except Exception as e:
+        print("Chrome channel failed, using Playwright Chromium instead.")
+        print("Reason:", e)
+
+        context = await p.chromium.launch_persistent_context(
+            user_data_dir=USER_DATA_DIR,
+            headless=False,
+            viewport={"width": 1280, "height": 900},
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-popup-blocking",
+                "--start-maximized",
+            ],
+        )
+
+        return context
+
+
+async def save_twitter_session():
+    """
+    One-time Twitter/X login.
+    Login manually using Google.
+    The session stays saved inside x_google_login_profile.
+    """
+
+    async with async_playwright() as p:
+        context = await open_persistent_twitter_context(p)
 
         page = context.pages[0] if context.pages else await context.new_page()
 
-        await page.goto("https://accounts.google.com", wait_until="domcontentloaded")
+        await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60000)
 
-        print("\nSTEP 1: Login to Google first in this browser.")
-        print("After Google login completes, open x.com/login in same browser.")
-        print("Then click Continue with Google.")
-        print("After X/Twitter home page opens, come back to terminal.")
-        input("Press Enter after Twitter/X login is fully complete: ")
+        print("\n" + "=" * 60)
+        print("TWITTER / X LOGIN")
+        print("=" * 60)
+        print("1. Login manually using Google.")
+        print("2. If white screen appears, type https://x.com/home manually.")
+        print("3. Complete any onboarding/SSO step.")
+        print("4. Wait until X home page/feed opens.")
+        print("5. Come back to terminal and press Enter.")
+        print("=" * 60)
 
-        await context.storage_state(path=SESSION_FILE)
+        input("Press Enter ONLY after X home/feed is fully visible: ")
 
-        print(f"✅ Twitter session saved successfully as {SESSION_FILE}")
+        await page.wait_for_timeout(3000)
+
+        if "login" in page.url or "onboarding" in page.url or "/i/jf/" in page.url:
+            await context.close()
+            raise Exception(
+                "Twitter/X login is still not complete. "
+                "Finish login/onboarding first, then run this command again."
+            )
+
+        print("✅ Twitter/X persistent profile saved successfully.")
+        print(f"Profile folder: {USER_DATA_DIR}")
 
         await context.close()
 
+
 async def extract_replies_from_tweet(tweet_url, max_replies=100):
     """
-    Opens browser visibly.
-    Admin/user logs in manually if needed.
-    Then scraper checks replies.
+    Uses the same persistent browser profile.
+    No fresh login every time.
     """
 
     replies = []
@@ -62,36 +98,43 @@ async def extract_replies_from_tweet(tweet_url, max_replies=100):
     tweet_owner = tweet_url.split("x.com/")[-1].split("/status")[0].lower().strip()
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False,
-            args=[
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-popup-blocking"
-            ]
-        )
+        context = await open_persistent_twitter_context(p)
 
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            )
-        )
-
-        page = await context.new_page()
+        page = context.pages[0] if context.pages else await context.new_page()
 
         print("Opening tweet:", tweet_url)
 
         await page.goto(tweet_url, wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(5000)
+        await page.wait_for_timeout(6000)
 
-        print("\nIf Twitter asks for login, login manually in opened browser.")
-        print("After tweet page is fully opened and replies are visible, come back here.")
-        input("Press Enter to start scraping: ")
+        print("Current Twitter URL:", page.url)
+
+        if "login" in page.url or "onboarding" in page.url or "/i/jf/" in page.url:
+            print("\nTwitter/X login is not fully completed.")
+            print("Complete login manually in the opened browser.")
+            print("If white screen appears, manually type: https://x.com/home")
+            print("After home opens, manually paste/open the tweet URL again.")
+            input("Press Enter ONLY when tweet page and replies are visible: ")
+
+            await page.wait_for_timeout(3000)
+
+            if "login" in page.url or "onboarding" in page.url or "/i/jf/" in page.url:
+                await context.close()
+                raise Exception(
+                    "Twitter/X is still on login/onboarding/SSO page. "
+                    "Scraping cannot start until tweet page is visible."
+                )
+
+        print("\nMake sure tweet page is visible.")
+        print("If replies are not visible yet, scroll manually a little.")
+        input("Press Enter to start scraping replies: ")
 
         await page.wait_for_timeout(3000)
+
+        # Move below original tweet
+        for _ in range(3):
+            await page.mouse.wheel(0, 1200)
+            await page.wait_for_timeout(2500)
 
         no_new_rounds = 0
 
@@ -132,6 +175,17 @@ async def extract_replies_from_tweet(tweet_url, max_replies=100):
                         print(f"Skipping original tweet owner: @{handle}")
                         continue
 
+                    bad_handles = [
+                        "home",
+                        "explore",
+                        "notifications",
+                        "messages",
+                        "settings",
+                    ]
+
+                    if handle in bad_handles:
+                        continue
+
                     unique_key = f"{handle}:{reply_text[:100]}"
 
                     if unique_key in seen:
@@ -162,7 +216,7 @@ async def extract_replies_from_tweet(tweet_url, max_replies=100):
             else:
                 no_new_rounds = 0
 
-        await browser.close()
+        await context.close()
 
     print(f"\nTotal replies collected: {len(replies)}")
 
@@ -170,11 +224,6 @@ async def extract_replies_from_tweet(tweet_url, max_replies=100):
 
 
 def run_scraper_sync(tweet_url, max_replies=100):
-    """
-    Django normal view cannot directly await async function.
-    So this helper runs async scraper in sync style.
-    """
-
     return asyncio.run(
         extract_replies_from_tweet(
             tweet_url=tweet_url,

@@ -682,6 +682,47 @@ export default function AdminDashboard({ onLogout }) {
     return value;
   };
 
+  const getSignalGroup = (signal) => {
+    const feature = String(signal?.feature || '').trim();
+    const reason = String(signal?.reason || '').toLowerCase();
+
+    if (feature === 'is_duplicate_screenshot' || reason.includes('duplicate screenshot')) return 'duplicate_screenshot';
+    if (feature === 'device_seller_count' || feature === 'device_sharing_score') return 'shared_device';
+    if (feature === 'ip_seller_count' || feature === 'ip_reuse_score') return 'shared_ip';
+    if (feature === 'automation_score' || feature === 'user_agent') return 'automation';
+    if (feature === 'seller_age_days') return 'new_account';
+    if (feature === 'image_brightness' || feature === 'image_quality_score' || feature === 'image_blur' || feature === 'image_size' || feature === 'image_detail') return `image_quality:${feature}`;
+    if (feature === 'timing_risk_score' || feature === 'completion_duration' || feature === 'validity_score' || feature === 'logical_behavior_flag') return 'suspicious_timing';
+    if (feature === 'std_dev' || feature === 'timing_consistency_score' || feature === 'repetitive_behavior_flag') return 'repetitive_behavior';
+
+    return feature || reason || 'unknown_signal';
+  };
+
+  const normalizeSignalList = (signals, maxItems = 8) => {
+    if (!Array.isArray(signals)) return [];
+
+    const bestByGroup = new Map();
+
+    signals.forEach((signal) => {
+      const normalizedSignal = typeof signal === 'object' && signal !== null
+        ? signal
+        : { reason: String(signal), feature: '', layer: '', value: '', impact: 0 };
+
+      const group = getSignalGroup(normalizedSignal);
+      const impact = Math.abs(Number(normalizedSignal.impact || 0));
+      const current = bestByGroup.get(group);
+      const currentImpact = Math.abs(Number(current?.impact || 0));
+
+      if (!current || impact > currentImpact) {
+        bestByGroup.set(group, normalizedSignal);
+      }
+    });
+
+    return Array.from(bestByGroup.values())
+      .sort((a, b) => Math.abs(Number(b.impact || 0)) - Math.abs(Number(a.impact || 0)))
+      .slice(0, maxItems);
+  };
+
   const getFraudMatchForProof = (proof) => {
     return fraudDetectionResults.find((result) => {
       const proofJobId = normalizeId(proof.jobId || proof.job_id || proof.currentJobId || proof.current_job_id);
@@ -716,16 +757,22 @@ export default function AdminDashboard({ onLogout }) {
       ?? 0
     );
     const riskLevel = matchedFraud?.risk_level || proof.riskLevel || proof.risk_level || getRiskLevelFromProbability(probability);
-    const suspiciousSignals = Array.isArray(matchedFraud?.suspicious_signals)
+    const rawSuspiciousSignals = Array.isArray(matchedFraud?.suspicious_signals)
       ? matchedFraud.suspicious_signals
       : Array.isArray(proof.suspiciousSignals)
         ? proof.suspiciousSignals
         : Array.isArray(proof.suspicious_signals)
           ? proof.suspicious_signals
           : [];
-    const fraudReasons = matchedFraud?.fraud_reasons ?? proof.fraudReasons ?? proof.fraud_reasons ?? proof.fraudCauses ?? [];
+    const suspiciousSignals = normalizeSignalList(rawSuspiciousSignals, 8);
+    const rawFraudReasons = matchedFraud?.fraud_reasons ?? proof.fraudReasons ?? proof.fraud_reasons ?? proof.fraudCauses ?? [];
+    const fraudReasons = Array.isArray(rawFraudReasons)
+      ? normalizeSignalList(rawFraudReasons, 5)
+      : rawFraudReasons;
     const prediction = matchedFraud?.prediction || proof.prediction || (probability >= 50 ? 'FRAUD' : 'LEGITIMATE');
     const isFraud = matchedFraud?.is_fraud ?? proof.isFraud ?? proof.is_fraud ?? probability >= 50;
+    const humanSummary = matchedFraud?.human_summary || matchedFraud?.humanExplanation?.summary || proof.humanSummary || '';
+    const adminRecommendation = matchedFraud?.admin_recommendation || matchedFraud?.humanExplanation?.admin_recommendation || proof.adminRecommendation || '';
 
     return {
       ...matchedFraud,
@@ -735,6 +782,8 @@ export default function AdminDashboard({ onLogout }) {
       fraudReasons,
       prediction,
       isFraud,
+      humanSummary,
+      adminRecommendation,
     };
   };
 
@@ -887,6 +936,8 @@ export default function AdminDashboard({ onLogout }) {
           const riskLevel = fraudData.riskLevel || getRiskLevelFromProbability(fraudProbability);
           const suspiciousSignals = Array.isArray(fraudData.suspiciousSignals) ? fraudData.suspiciousSignals : [];
           const fraudReasons = fraudData.fraudReasons;
+          const humanSummary = fraudData.humanSummary || `${safeDisplay(fraudData.prediction)} result with ${fraudProbability}% fraud probability (${riskLevel} risk).`;
+          const adminRecommendation = fraudData.adminRecommendation || (fraudProbability >= 70 ? 'Reject or manually verify before approval.' : fraudProbability >= 40 ? 'Manually check the proof carefully.' : 'Looks safe, but still verify the screenshot before approval.');
           const isOpen = openedFraudProofId === proof.jobId;
           const topSignal = suspiciousSignals[0];
 
@@ -935,7 +986,7 @@ export default function AdminDashboard({ onLogout }) {
                     <div className="mb-2 flex items-center justify-between gap-2 text-xs">
                       <div>
                         <p className="font-semibold text-gray-900">AI Fraud Probability</p>
-                        <p className="text-gray-500">{safeDisplay(fraudData.prediction)} · {suspiciousSignals.length} signal{suspiciousSignals.length === 1 ? '' : 's'}</p>
+                        <p className="text-gray-500">{humanSummary}</p>
                       </div>
                       <span className="rounded-full bg-white px-2.5 py-1 font-bold text-gray-900 shadow-sm">{fraudProbability}%</span>
                     </div>
@@ -944,6 +995,9 @@ export default function AdminDashboard({ onLogout }) {
                         className="h-full rounded-full transition-all duration-500 ease-out"
                         style={getFraudBarStyle(fraudProbability, riskLevel)}
                       />
+                    </div>
+                    <div className="mt-3 rounded-xl border border-blue-100 bg-blue-50 p-3 text-xs text-blue-900">
+                      <span className="font-semibold">Admin help: </span>{adminRecommendation}
                     </div>
                   </div>
 
@@ -1014,6 +1068,20 @@ export default function AdminDashboard({ onLogout }) {
                       <p className="text-xs text-gray-500">Timing Risk</p>
                       <p className="mt-1 text-sm font-semibold text-gray-900">{safeDisplay(fraudData.timing_risk_score)}</p>
                     </div>
+                    <div className="rounded-xl border border-gray-200 bg-white p-3">
+                      <p className="text-xs text-gray-500">Device Sellers</p>
+                      <p className="mt-1 text-sm font-semibold text-gray-900">{safeDisplay(fraudData.device_seller_count)}</p>
+                    </div>
+                    <div className="rounded-xl border border-gray-200 bg-white p-3">
+                      <p className="text-xs text-gray-500">IP Sellers</p>
+                      <p className="mt-1 text-sm font-semibold text-gray-900">{safeDisplay(fraudData.ip_seller_count)}</p>
+                    </div>
+                  </div>
+
+                  <div className="mb-4 rounded-2xl border border-blue-100 bg-white p-4">
+                    <h4 className="text-sm font-semibold text-gray-900">Human-readable result</h4>
+                    <p className="mt-1 text-sm text-gray-600">{humanSummary}</p>
+                    <p className="mt-2 text-sm font-medium text-blue-800">{adminRecommendation}</p>
                   </div>
 
                   <div className="grid gap-4 lg:grid-cols-[1.35fr_0.9fr]">

@@ -12,12 +12,14 @@ from django.db.models.functions import TruncMonth
 from django.http import JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
-from BackEnd.utils import assign_jobs_round_robin
+from BackEnd.utils import assign_jobs_round_robin, get_phash
 from .models import BuyerProfile, BuyerTasks, EasypaisaTransaction, RatingIndexes, SellerBehaviorLog, SellerProfile, SellerWithdrawalRequest, User,JobsHistory,JobRatingQuota,TestAccount,SocialAccount,SocialAuth,Transaction,VirtualWallet
 from .seller_rating import calculate_seller_rating, rating_dataset_summary, update_seller_rating
+from detectfraud.image_analysis import analyze_proof_image_quality
 from django.db import transaction
 from django.views.decorators.http import require_http_methods
 
+from django.db.models import F, Max
 
 def get_easypaisa_credentials_header():
     raw_credentials = f"{settings.EASYPAISA_USERNAME}:{settings.EASYPAISA_PASSWORD}"
@@ -943,6 +945,27 @@ def assign_task_to_available_sellers(task):
     return 0
 
 
+def _normalize_platform_name(platform):
+    """
+    Normalize platform names so Instagram/insta and Twitter/X/x match correctly.
+    """
+    value = (platform or "").strip().lower()
+
+    if value in ["instagram", "insta"]:
+        return "instagram"
+
+    if value in ["twitter", "x", "twitter/x", "x.com"]:
+        return "twitter"
+
+    if value in ["facebook", "fb"]:
+        return "facebook"
+
+    if value in ["youtube", "yt"]:
+        return "youtube"
+
+    return value
+
+
 def get_connected_platforms_for_seller(seller_profile):
     """
     Returns platforms connected by THIS exact seller account only.
@@ -957,29 +980,99 @@ def get_connected_platforms_for_seller(seller_profile):
     ).values_list("platform", flat=True)
 
     return {
-        (platform or "").strip().lower()
+        _normalize_platform_name(platform)
         for platform in platforms
         if platform
     }
 
 
+def _get_seller_connected_platforms(seller_profile):
+    """
+    Get platforms connected to this exact seller account only.
+    This is a helper alias used by the seller priority checks.
+    """
+    return get_connected_platforms_for_seller(seller_profile)
+
+
+def _seller_has_connected_platform(seller_profile, task_platform):
+    """
+    Check if seller has connected the platform required by the task.
+    """
+    connected_platforms = _get_seller_connected_platforms(seller_profile)
+    required_platform = _normalize_platform_name(task_platform)
+
+    return required_platform in connected_platforms
+
+
 def _seller_pending_buyer_ids(seller_profile):
     """
-    Buyer IDs for which this seller currently has an unsubmitted assigned job.
+    Buyer IDs currently blocked for this seller.
 
-    Important new rule:
-    - submitted proof does NOT block the seller anymore
-    - only pending/assigned task blocks another task from the same buyer
-    - seller may still receive tasks from other buyers
+    Seller may receive tasks from different buyers.
+
+    But for the same buyer, block new assignment while seller has:
+    - pending/assigned task not submitted yet
+    - submitted proof still waiting for admin review
+
+    After admin approves/rejects, that buyer becomes available again.
     """
     return set(
         JobsHistory.objects.filter(
             seller=seller_profile,
-            status="pending",
             task__approval_status="approved",
             task__virtual_wallet__status="holding",
+        ).filter(
+            Q(status="pending") |
+            Q(status="assigned") |
+            Q(status="submitted", proofStatus="pending")
         ).values_list("task__buyer_id", flat=True)
     )
+
+
+def _seller_has_unsubmitted_job_from_same_buyer(seller_profile, buyer_id):
+    """
+    Buyer-level lock.
+
+    A seller can hold tasks from different buyers at the same time.
+
+    But if the seller already has an open or unreviewed job from Buyer 1,
+    then he should not receive another Buyer 1 job until that first Buyer 1
+    job is reviewed.
+
+    Blocking statuses:
+    - pending / assigned: seller has task but has not submitted proof yet
+    - submitted + proof pending: seller submitted proof but admin has not reviewed yet
+
+    After admin approves/rejects, the seller can receive another task from
+    the same buyer again.
+    """
+    return JobsHistory.objects.filter(
+        seller=seller_profile,
+        task__buyer_id=buyer_id,
+        task__approval_status="approved",
+        task__virtual_wallet__status="holding",
+    ).filter(
+        Q(status="pending") |
+        Q(status="assigned") |
+        Q(status="submitted", proofStatus="pending")
+    ).exists()
+
+
+def _seller_has_pending_review_for_same_task(seller_profile, task):
+    """
+    Task-level lock.
+
+    Seller cannot receive the SAME BuyerTask again while his previous proof
+    for that same BuyerTask is waiting for admin approval/rejection.
+
+    This mainly protects repeatable comment/view/watch tasks.
+    """
+    return JobsHistory.objects.filter(
+        seller=seller_profile,
+        task=task,
+        status="submitted",
+        proofStatus="pending",
+    ).exists()
 
 
 def _seller_rejected_task_twice(seller_profile, task):
@@ -1018,21 +1111,200 @@ def _serialize_seller_job(job):
     }
 
 
+def _seller_priority_tuple(seller_profile):
+    """
+    Lower tuple = higher seller priority.
+
+    Priority logic:
+    1. Sellers who never received a task get first chance.
+    2. Then sellers with the oldest last assignment get priority.
+    3. Then sellers who waited longer in queue get priority.
+    4. Higher trust score wins only when fairness is equal.
+    """
+
+    now = timezone.now()
+
+    if seller_profile.last_assigned_at is None:
+        last_assigned_rank = 0
+        last_assigned_time = timezone.datetime.min.replace(
+            tzinfo=timezone.get_current_timezone()
+        )
+    else:
+        last_assigned_rank = 1
+        last_assigned_time = seller_profile.last_assigned_at
+
+    queue_time = seller_profile.queue_joined_at or now
+
+    try:
+        trust_score = Decimal(seller_profile.trust_score or 0)
+    except Exception:
+        trust_score = Decimal("0")
+
+    return (
+        last_assigned_rank,
+        last_assigned_time,
+        queue_time,
+        -trust_score,
+        seller_profile.id,
+    )
+
+
+def _normalize_task_type(task_type):
+    """
+    Normalize task type names safely.
+
+    Examples:
+    - "Followers" -> "followers"
+    - "watch_time" -> "watch time"
+    - "youtube-like" -> "youtube like"
+    """
+    return (task_type or "").strip().lower().replace("-", " ").replace("_", " ")
+
+
+def _is_one_time_task(task):
+    """
+    These task types should be performed only ONCE by the same seller
+    for the same BuyerTask.
+
+    Reason:
+    - Same seller cannot like the same post twice.
+    - Same seller cannot follow the same account twice.
+    - Same seller cannot subscribe to the same channel twice.
+
+    NOTE:
+    Comments and views/watch tasks are intentionally NOT included here.
+    Comments/views/watch may be assigned again to the same seller only after
+    admin approves/rejects the seller's previous proof for that same job.
+    """
+    task_type = _normalize_task_type(task.taskType)
+
+    one_time_keywords = [
+        "like",
+        "likes",
+        "follow",
+        "follows",
+        "follower",
+        "followers",
+        "subscribe",
+        "subscriber",
+        "subscribers",
+    ]
+
+    return any(keyword == task_type or keyword in task_type for keyword in one_time_keywords)
+
+
+def _seller_already_attempted_same_task(seller_profile, task):
+    """
+    For like/follow/subscribe tasks:
+    if this seller already received this BuyerTask once, never assign
+    the same BuyerTask to the same seller again.
+
+    For comment/view/watch tasks:
+    return False here, because those can repeat after admin review.
+    """
+    if not _is_one_time_task(task):
+        return False
+
+    return JobsHistory.objects.filter(
+        seller=seller_profile,
+        task=task,
+    ).exists()
+
+
+def _seller_is_eligible_for_quota(seller_profile, quota):
+    """
+    Check if this seller is eligible for this quota.
+
+    Final rules:
+    - rating must match
+    - seller must be online
+    - platform must be connected by this exact seller
+    - seller cannot have another open/unreviewed task from the same buyer
+    - seller cannot get same BuyerTask while previous proof is under review
+    - like/follow/subscribe tasks can be assigned only once per seller
+    - comment/view/watch tasks can repeat only after admin review
+    - rejected twice on same task means skip that task
+    """
+    task = quota.task
+
+    if seller_profile.ratings != quota.rating:
+        return False
+
+    if not getattr(seller_profile, "is_online", False):
+        return False
+
+    if not _seller_has_connected_platform(seller_profile, task.platform):
+        return False
+
+    # One open/unreviewed task from same buyer at a time.
+    if _seller_has_unsubmitted_job_from_same_buyer(seller_profile, task.buyer_id):
+        return False
+
+    # Same BuyerTask cannot be assigned again until admin reviews previous proof.
+    if _seller_has_pending_review_for_same_task(seller_profile, task):
+        return False
+
+    # Like/follow/subscribe tasks are one-time per seller per BuyerTask.
+    # Comment/view/watch tasks are repeatable after admin review.
+    if _seller_already_attempted_same_task(seller_profile, task):
+        return False
+
+    # If seller rejected twice on same task, skip this task.
+    if _seller_rejected_task_twice(seller_profile, task):
+        return False
+
+    return True
+
+
+def _get_highest_priority_seller_for_quota(quota):
+    """
+    Find the seller who deserves this quota the most right now.
+
+    This prevents the fastest-refreshing seller from taking all jobs.
+    """
+    possible_sellers = (
+        SellerProfile.objects
+        .filter(
+            ratings=quota.rating,
+            is_online=True,
+        )
+        .select_related("user")
+    )
+
+    eligible_sellers = []
+
+    for seller in possible_sellers:
+        if _seller_is_eligible_for_quota(seller, quota):
+            eligible_sellers.append(seller)
+
+    if not eligible_sellers:
+        return None
+
+    eligible_sellers.sort(key=_seller_priority_tuple)
+    return eligible_sellers[0]
+
+
 def _get_next_quota_for_seller(seller_profile, connected_platforms, blocked_buyer_ids=None):
     """
     Pick next quota fairly for this seller.
 
-    New final assignment rules:
+    Final assignment rules:
     - Match seller rating.
     - Match this exact seller's connected OAuth platforms.
-    - Seller can receive more than one open job overall.
-    - Seller can receive only ONE pending/unsubmitted job from the same buyer.
-    - Submitted proof does NOT block new assignment anymore.
-    - If this seller has rejected the same BuyerTask twice, skip that task.
-    - Prefer quotas with lower served count, then least recently served quota.
+    - Seller can receive jobs from different buyers.
+    - Seller cannot receive another unsubmitted/open job from same buyer.
+    - Seller cannot receive same BuyerTask again while previous proof
+      for same BuyerTask is pending admin review.
+    - For like/follow/subscribe tasks, seller cannot receive
+      the same BuyerTask again ever.
+    - Comment/view/watch tasks can repeat only after admin review.
+    - Seller rejected twice on same BuyerTask will not receive it again.
+    - New/idle sellers get priority over recently assigned sellers.
+    - Fast-refresh seller cannot steal all jobs.
     """
+
     normalized_platforms = {
-        (platform or "").strip().lower()
+        _normalize_platform_name(platform)
         for platform in connected_platforms
         if platform
     }
@@ -1060,17 +1332,38 @@ def _get_next_quota_for_seller(seller_profile, connected_platforms, blocked_buye
 
     for quota in candidate_quotas:
         task = quota.task
-        task_platform = (task.platform or "").strip().lower()
+        task_platform = _normalize_platform_name(task.platform)
 
+        # Seller must have connected account for this platform.
         if task_platform not in normalized_platforms:
             continue
 
-        # One pending/unsubmitted task per buyer at a time.
+        # One open/unreviewed task per buyer at a time.
         if task.buyer_id in blocked_buyer_ids:
             continue
 
-        # Brilliant rule you noticed: after 2 rejects on same task, do not give it again.
+        # Same BuyerTask pending review rule.
+        if _seller_has_pending_review_for_same_task(seller_profile, task):
+            continue
+
+        # Like/follow/subscribe are one-time per seller per BuyerTask.
+        # Comment/view/watch can repeat after admin review.
+        if _seller_already_attempted_same_task(seller_profile, task):
+            continue
+
+        # Rejected twice rule.
         if _seller_rejected_task_twice(seller_profile, task):
+            continue
+
+        # Priority rule:
+        # Even if this seller requested first, only assign this quota
+        # if this seller is currently the highest priority eligible seller.
+        highest_priority_seller = _get_highest_priority_seller_for_quota(quota)
+
+        if not highest_priority_seller:
+            continue
+
+        if highest_priority_seller.id != seller_profile.id:
             continue
 
         valid_quotas.append(quota)
@@ -1079,22 +1372,38 @@ def _get_next_quota_for_seller(seller_profile, connected_platforms, blocked_buye
         return None
 
     def quota_priority(quota):
+        """
+        Lower tuple = higher quota priority.
+
+        Priority:
+        1. Quota with lower served count first.
+        2. Never-served quota first.
+        3. Least recently served quota next.
+        4. Newer task gets slight priority if everything else is equal.
+        """
         total_served = (quota.assigned_count or 0) + (quota.completed_count or 0)
-        never_served_flag = 0 if quota.last_served_at is None else 1
-        last_served_time = quota.last_served_at or timezone.datetime.min.replace(
-            tzinfo=timezone.get_current_timezone()
-        )
+
+        if quota.last_served_at is None:
+            last_served_rank = 0
+            last_served_time = timezone.datetime.min.replace(
+                tzinfo=timezone.get_current_timezone()
+            )
+        else:
+            last_served_rank = 1
+            last_served_time = quota.last_served_at
+
         created_time = quota.created_at or timezone.now()
 
         return (
-            total_served,             # lower served count first
-            never_served_flag,        # never-served jobs first
-            last_served_time,         # then least recently served
-            -created_time.timestamp(),# newer job wins only as tie-breaker
+            total_served,
+            last_served_rank,
+            last_served_time,
+            -created_time.timestamp(),
             quota.id,
         )
 
     valid_quotas.sort(key=quota_priority)
+
     return valid_quotas[0]
 
 
@@ -1102,8 +1411,10 @@ def _create_next_job_for_seller(seller_profile, connected_platforms, blocked_buy
     """
     Lazy assignment:
     - creates only ONE JobsHistory row per call
-    - does not wait for admin approval of submitted proofs
-    - blocks only buyers where seller already has a pending/unsubmitted job
+    - does not wait for admin approval of submitted proofs globally
+    - blocks only buyers where seller already has an open/unreviewed job
+    - blocks the same BuyerTask while seller's previous proof is pending admin review
+    - respects seller priority so new/idle sellers get fair opportunity
     """
     if not connected_platforms:
         return None
@@ -1162,13 +1473,12 @@ def approved_tasks(request):
         return JsonResponse({"tasks": []}, status=200)
 
     with transaction.atomic():
-        seller_profile = SellerProfile.objects.select_for_update().get(id=seller_profile.id)
+        seller_profile = SellerProfile.objects.get(id=seller_profile.id)
 
         # Show only pending/unsubmitted assigned jobs to the seller.
-        # Submitted proofs are with admin, but they no longer block future assignment.
+        # Submitted proofs are with admin, but they no longer block jobs from other buyers.
         active_jobs = list(
             JobsHistory.objects
-            .select_for_update()
             .filter(
                 seller=seller_profile,
                 status="pending",
@@ -1179,15 +1489,25 @@ def approved_tasks(request):
             .order_by("startDate", "id")
         )
 
-        blocked_buyer_ids = {job.task.buyer_id for job in active_jobs if job.task_id}
+        # Block another assignment from the same buyer if this seller already has
+        # either an unsubmitted job OR a submitted proof still pending admin review.
+        blocked_buyer_ids = _seller_pending_buyer_ids(seller_profile)
+
+        now = timezone.now()
+        was_offline = not getattr(seller_profile, "is_online", False)
 
         seller_profile.is_online = True
         seller_profile.is_available = True
-        seller_profile.queue_joined_at = seller_profile.queue_joined_at or timezone.now()
+
+        # If seller just came online or has no queue time, start a fresh queue wait time.
+        if was_offline or seller_profile.queue_joined_at is None:
+            seller_profile.queue_joined_at = now
+
         seller_profile.save(update_fields=["is_online", "is_available", "queue_joined_at"])
 
-        # Create ONE more task per poll/call, but only from a buyer that is not already pending.
-        # This lets a seller receive tasks from multiple buyers without waiting for admin review.
+        # Create ONE more task per poll/call, but only from a buyer that is not already open/unreviewed.
+        # This lets a seller receive tasks from multiple buyers without waiting for admin review,
+        # while still preventing the same seller from repeatedly taking the same buyer/task.
         new_job = _create_next_job_for_seller(
             seller_profile,
             connected_platforms,
@@ -1200,9 +1520,11 @@ def approved_tasks(request):
     for job in active_jobs:
         if not job or job.status != "pending":
             continue
-        platform = (job.task.platform or "").strip().lower()
+
+        platform = _normalize_platform_name(job.task.platform)
         if platform not in connected_platforms:
             continue
+
         data.append(_serialize_seller_job(job))
 
     return JsonResponse({"tasks": data}, status=200)
@@ -1217,6 +1539,22 @@ def calculate_file_sha256(uploaded_file):
     uploaded_file.seek(0)
 
     return sha256.hexdigest()
+
+
+def calculate_file_phash(uploaded_file):
+    if not uploaded_file:
+        return ""
+    try:
+        uploaded_file.seek(0)
+        phash_value = get_phash(uploaded_file)
+        uploaded_file.seek(0)
+        return phash_value or ""
+    except Exception:
+        try:
+            uploaded_file.seek(0)
+        except Exception:
+            pass
+        return ""
 
 
 def approve_seller_job(job, task, seller_profile, virtual_wallet, payment_amount):
@@ -1323,6 +1661,8 @@ def submit_task(request):
 
     time_spent = (time_spent_seconds / Decimal("3600.00")).quantize(Decimal("0.0001"))
     proof_sha256 = calculate_file_sha256(proof_image) if proof_image else ""
+    proof_phash = calculate_file_phash(proof_image) if proof_image else ""
+    proof_image_analysis = analyze_proof_image_quality(proof_image) if proof_image else {}
 
     try:
         with transaction.atomic():
@@ -1381,6 +1721,7 @@ def submit_task(request):
             job.proofUrl = proof_url
             job.proofImage = proof_image
             job.proofSha256 = proof_sha256
+            job.proofPhash = proof_phash
             job.notes = notes
             job.completionTime = time_spent
             job.endDate = timezone.now()
@@ -1390,6 +1731,7 @@ def submit_task(request):
                     "proofUrl",
                     "proofImage",
                     "proofSha256",
+                    "proofPhash",
                     "notes",
                     "completionTime",
                     "endDate",
@@ -1404,6 +1746,7 @@ def submit_task(request):
                     "proofStatus": job.proofStatus,
                     "behaviorLogId": behavior_log.id,
                     "sellerRating": rating_data,
+                    "proofImageAnalysis": proof_image_analysis,
                 }, status=200)
 
             job.status = "submitted"
@@ -1413,6 +1756,7 @@ def submit_task(request):
                 "proofUrl",
                 "proofImage",
                 "proofSha256",
+                "proofPhash",
                 "proofStatus",
                 "proofReviewedDate",
                 "notes",
@@ -1442,6 +1786,7 @@ def submit_task(request):
         "jobStatus": job.status,
         "proofStatus": job.proofStatus,
         "behaviorLogId": behavior_log.id,
+        "proofImageAnalysis": proof_image_analysis,
     }, status=200)
 
 
@@ -2268,6 +2613,7 @@ def fraud_dashboard_api(request):
     for r in qs:
         results.append({
             "id":               r.id,
+            "job_id":           r.job_id,
             "analyzed_at":      r.analyzed_at.isoformat(),
 
             # Seller
@@ -2299,7 +2645,9 @@ def fraud_dashboard_api(request):
             "repetitive_behavior_flag": r.repetitive_behavior_flag,
             "overall_behavior_label":   r.overall_behavior_label,
 
-            # Layer 2 — Device
+            # Layer 2 — Device / IP
+            "ip_address":           r.ip_address,
+            "device_id":            r.device_id,
             "device_seller_count":  r.device_seller_count,
             "ip_seller_count":      r.ip_seller_count,
             "device_sharing_score": r.device_sharing_score,
@@ -2312,8 +2660,18 @@ def fraud_dashboard_api(request):
             "fraud_probability": r.fraud_probability,
             "risk_level":        r.risk_level,
             "is_fraud":          r.is_fraud,
-            "fraud_reasons":     r.fraud_reasons,
-            "suspicious_signals": r.suspicious_signals,
+            # fraud_reasons are shown whenever suspicious signals exist, not only at 100% probability.
+            "fraud_reasons":     r.fraud_reasons or r.suspicious_signals or [],
+            "suspicious_signals": r.suspicious_signals or r.fraud_reasons or [],
+            "human_summary": (
+                f"{r.prediction.title()} with {round(float(r.fraud_probability or 0), 2)}% probability ({r.risk_level} risk). "
+                f"Device sellers: {r.device_seller_count}, IP sellers: {r.ip_seller_count}."
+            ),
+            "admin_recommendation": (
+                "Reject or manually verify before approval." if float(r.fraud_probability or 0) >= 70 else
+                "Manually check the proof carefully." if float(r.fraud_probability or 0) >= 40 else
+                "Looks safe, but still verify the screenshot before approval."
+            ),
         })
 
     return JsonResponse({

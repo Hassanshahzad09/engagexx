@@ -7,6 +7,7 @@ from django.utils import timezone
 import json
 import statistics
 import os
+import hashlib
 import numpy as np
 import pandas as pd
 import joblib
@@ -15,6 +16,7 @@ import shap
 from BackEnd.utils import get_sha256, get_phash, hamming_distance, HAMMING_THRESHOLD
 from service.models import JobsHistory, BuyerTasks, SellerProfile, SellerBehaviorLog
 from .models import FraudAnalysisResult
+from .image_analysis import analyze_proof_image_quality
 
 # ======================================================
 # PATHS
@@ -46,7 +48,7 @@ def train_model():
     from sklearn.preprocessing import LabelEncoder
     from sklearn.metrics import accuracy_score, classification_report
 
-    df = pd.read_csv(settings.BASE_DIR / "engagex_dataset_v4.csv")
+    df = pd.read_csv(settings.BASE_DIR / "engagex_dataset_v5_balanced_layers.csv")
     df.dropna(inplace=True)
 
     le_seller = LabelEncoder()
@@ -58,7 +60,7 @@ def train_model():
     print(f"[EngageX] seller_type mapping: {list(le_seller.classes_)}")
     print(f"[EngageX] task_type mapping:   {list(le_task.classes_)}")
 
-    DROP_COLS = ["fraud_label","device_risk_score","final_behavior_risk_score","automation_score"]
+    DROP_COLS = ["fraud_label", "device_risk_score", "final_behavior_risk_score"]
     DROP_COLS = [c for c in DROP_COLS if c in df.columns]
 
     X = df.drop(columns=DROP_COLS)
@@ -149,9 +151,272 @@ FEATURE_REASONS = {
 }
 
 
+
+
+# ======================================================
+# HELPERS — NORMALIZATION + HUMAN EXPLANATION
+# ======================================================
+def normalize_task_type(task_type):
+    task_type = (task_type or "").strip()
+    task_type_map = {
+        "like": "Like", "likes": "Like",
+        "follow": "Follow", "follows": "Follow",
+        "comment": "Comment", "comments": "Comment",
+        "subscribe": "Subscribe", "subscribes": "Subscribe",
+        "subscribing": "Subscribe", "subscription": "Subscribe",
+    }
+    return task_type_map.get(task_type.lower(), task_type)
+
+
+def _get_request_ip(request):
+    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return request.META.get("REMOTE_ADDR", "") or ""
+
+
+def _make_server_device_id(ip_address, user_agent):
+    """
+    Fallback only. Best device_id should come from frontend localStorage/fingerprint.
+    This fallback keeps Module 3 alive when frontend sends blank deviceId.
+    """
+    source = f"{ip_address or ''}|{user_agent or ''}"
+    if not source.strip('|'):
+        return ""
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _hydrate_network_context(request, current_job, ip_address, device_id, user_agent):
+    """
+    Fraud API sometimes receives empty ipAddress/deviceId from frontend.
+    In that case, use the behavior log created during submit_task(), then request metadata,
+    then a safe server-side fallback device id.
+    """
+    ip_address = (ip_address or "").strip()
+    device_id = (device_id or "").strip()
+    user_agent = (user_agent or "").strip()
+
+    latest_log = None
+    if current_job:
+        latest_log = current_job.behavior_logs.order_by("-created_at").first()
+
+    if latest_log:
+        ip_address = ip_address or (latest_log.ip_address or "")
+        device_id = device_id or (latest_log.device_id or "")
+        user_agent = user_agent or (latest_log.user_agent or "")
+
+    ip_address = ip_address or _get_request_ip(request)
+    user_agent = user_agent or request.META.get("HTTP_USER_AGENT", "")
+    device_id = device_id or _make_server_device_id(ip_address, user_agent)
+
+    return ip_address, device_id, user_agent
+
+
+def _signal(feature, layer, reason, value, impact=0):
+    return {
+        "feature": feature,
+        "layer": layer,
+        "reason": reason,
+        "value": value,
+        "impact": impact,
+    }
+
+
+def _make_human_explanation(layer1_result, timing_result, behavior_result, device_result, layer3_result):
+    probability = float(layer3_result.get("fraud_probability", 0) or 0)
+    risk_level = layer3_result.get("risk_level", "LOW")
+    prediction = layer3_result.get("prediction", "LEGITIMATE")
+    summary = f"{prediction.title()} result with {probability}% fraud probability ({risk_level} risk)."
+    points = []
+
+    if layer1_result.get("is_duplicate_screenshot"):
+        points.append("The submitted screenshot matches an older proof.")
+    elif layer1_result.get("image_quality_label") and layer1_result.get("image_quality_label") != "No image provided":
+        points.append(f"Screenshot check: {layer1_result.get('image_quality_label')}.")
+
+    if timing_result.get("timing_risk_score", 0) >= 20:
+        points.append(f"Timing looks suspicious: completed in {timing_result.get('completion_duration')} seconds.")
+
+    final_behavior = behavior_result.get("final_behavior_analysis", {})
+    history_count = behavior_result.get("layer_a", {}).get("history_count", 0)
+    if final_behavior.get("repetitive_behavior_flag"):
+        points.append("Seller has enough previous tasks and the timing pattern looks repetitive.")
+    elif history_count < 2:
+        points.append("No repetitive behavior penalty was applied because this seller has insufficient task history.")
+
+    device_count = device_result.get("device_analysis", {}).get("device_seller_count", 1)
+    ip_count = device_result.get("ip_analysis", {}).get("ip_seller_count", 1)
+    if device_count > 1:
+        points.append(f"Same device is linked with {device_count} seller accounts.")
+    if ip_count > 2:
+        points.append(f"Same IP address is linked with {ip_count} seller accounts.")
+    if device_result.get("automation_analysis", {}).get("automation_score", 0) >= 70:
+        points.append("Browser/user-agent looks automated, so manual verification is recommended.")
+
+    if not points:
+        points.append("No strong fraud signal was found; admin can review the proof normally.")
+
+    return {
+        "summary": summary,
+        "decision_help": points,
+        "admin_recommendation": (
+            "Reject or manually verify before approval." if probability >= 70 else
+            "Manually check the proof carefully." if probability >= 40 else
+            "Looks safe, but still verify the screenshot before approval."
+        )
+    }
+
 # ======================================================
 # SHAP REASON EXTRACTOR
 # ======================================================
+def _signal_group(signal):
+    """
+    Group technically different features into one admin-visible reason.
+    Example: device_seller_count and device_sharing_score both mean shared device.
+    """
+    feature = str(signal.get("feature", "")).strip()
+    reason = str(signal.get("reason", "")).strip().lower()
+
+    if feature == "is_duplicate_screenshot" or "duplicate screenshot" in reason:
+        return "duplicate_screenshot"
+    if feature in {"device_seller_count", "device_sharing_score"}:
+        return "shared_device"
+    if feature in {"ip_seller_count", "ip_reuse_score"}:
+        return "shared_ip"
+    if feature in {"image_brightness", "image_quality_score", "image_blur", "image_size", "image_detail"}:
+        return f"image_quality:{feature}"
+    if feature in {"automation_score", "user_agent"}:
+        return "automation"
+    if feature == "seller_age_days":
+        return "new_account"
+    if feature in {"timing_risk_score", "completion_duration", "validity_score", "logical_behavior_flag"}:
+        return "suspicious_timing"
+    if feature in {"std_dev", "timing_consistency_score", "repetitive_behavior_flag"}:
+        return "repetitive_behavior"
+    if feature in {"z_score", "population_score"}:
+        return "population_deviation"
+    return feature or reason
+
+
+def _safe_float(value, default=0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _dedupe_signals(signals, max_items=None):
+    """
+    Keep one clean reason per fraud group.
+    Manual rule impacts are on 0-100 scale; SHAP impacts are usually tiny decimals.
+    This avoids showing the same thing twice like:
+    - Same device is linked with 9 sellers
+    - Device is shared among multiple sellers
+    """
+    best = {}
+    order = []
+
+    for signal in signals or []:
+        if not isinstance(signal, dict):
+            signal = {"reason": str(signal), "feature": "", "layer": "", "value": "", "impact": 0}
+
+        group = _signal_group(signal)
+        impact = abs(_safe_float(signal.get("impact", 0)))
+        current = best.get(group)
+
+        if current is None:
+            best[group] = signal
+            order.append(group)
+            continue
+
+        current_impact = abs(_safe_float(current.get("impact", 0)))
+        if impact > current_impact:
+            best[group] = signal
+
+    cleaned = list(best.values())
+    cleaned.sort(key=lambda x: abs(_safe_float(x.get("impact", 0))), reverse=True)
+
+    if max_items:
+        return cleaned[:max_items]
+    return cleaned
+
+
+def _strong_fraud_reasons(signals, probability, max_items=5):
+    """
+    Fraud reasons should be strong/admin-actionable reasons only.
+    Weak model hints remain in suspicious_signals.
+    """
+    strong = []
+    for signal in _dedupe_signals(signals):
+        group = _signal_group(signal)
+        impact = abs(_safe_float(signal.get("impact", 0)))
+
+        if group == "duplicate_screenshot":
+            strong.append(signal)
+        elif group == "shared_device" and impact >= 30:
+            strong.append(signal)
+        elif group == "shared_ip" and impact >= 25:
+            strong.append(signal)
+        elif group == "automation" and impact >= 70:
+            strong.append(signal)
+        elif group.startswith("image_quality") and impact >= 20:
+            strong.append(signal)
+        elif probability >= 50 and impact >= 1:
+            strong.append(signal)
+
+    return _dedupe_signals(strong, max_items=max_items)
+
+
+def _apply_rule_based_probability_floor(layer3_result, layer1_result, flat_device, device_result):
+    """
+    ML probability can be low when the dataset/model under-weights hard fraud rules.
+    Exact duplicate proof or heavily shared device should still produce a strong final risk.
+    """
+    probability = float(layer3_result.get("fraud_probability", 0) or 0)
+    floor = 0
+
+    duplicate_type = layer1_result.get("duplicate_type", "none")
+    if layer1_result.get("is_duplicate_screenshot"):
+        floor = max(floor, 90 if duplicate_type == "exact_sha256" else 80)
+
+    device_count = int(flat_device.get("device_seller_count", 1) or 1)
+    ip_count = int(flat_device.get("ip_seller_count", 1) or 1)
+    auto_score = int(device_result.get("automation_analysis", {}).get("automation_score", 0) or 0)
+
+    if device_count >= 5:
+        floor = max(floor, 75)
+    elif device_count >= 3:
+        floor = max(floor, 60)
+
+    if auto_score >= 70:
+        floor = max(floor, 70)
+
+    # IP is softer because same WiFi/hostel/lab can be normal.
+    if ip_count >= 8 and device_count >= 3:
+        floor = max(floor, 80)
+
+    final_probability = round(max(probability, floor), 2)
+    layer3_result["fraud_probability"] = final_probability
+    layer3_result["label"] = 1 if final_probability >= 50 else 0
+    layer3_result["prediction"] = "FRAUD" if final_probability >= 50 else "LEGITIMATE"
+
+    if final_probability < 20:
+        layer3_result["risk_level"] = "LOW"
+    elif final_probability < 50:
+        layer3_result["risk_level"] = "MEDIUM"
+    elif final_probability < 75:
+        layer3_result["risk_level"] = "HIGH"
+    else:
+        layer3_result["risk_level"] = "CRITICAL"
+
+    if floor > probability:
+        layer3_result["probability_adjustment_note"] = (
+            f"ML probability was {probability}%, but rule-based hard signals raised final risk to {final_probability}%."
+        )
+
+    return layer3_result
+
+
 def get_fraud_reasons(shap_values, feature_names, input_data, top_n=5):
     if hasattr(shap_values, "values"):
         sv = shap_values.values[0]
@@ -182,8 +447,7 @@ def get_fraud_reasons(shap_values, feature_names, input_data, top_n=5):
                 "impact":  round(float(shap_val), 4),
             })
 
-    reasons.sort(key=lambda x: x["impact"], reverse=True)
-    return reasons[:top_n]
+    return _dedupe_signals(reasons, max_items=top_n)
 
 
 # ======================================================
@@ -266,19 +530,11 @@ def _run_timing_analysis(task_id, task_type, completion_time):
 # ======================================================
 def _run_repetitive_behavior(task_id, seller_id, task_type, completion_time):
 
-    # ── Normalize task_type to match your thresholds ──────────────
-    # Handles: 'follows' → 'Follow', 'likes' → 'Like', etc.
-    task_type_map = {
-        "like": "Like", "likes": "Like",
-        "follow": "Follow", "follows": "Follow",
-        "comment": "Comment", "comments": "Comment",
-        "subscribe": "Subscribe", "subscribes": "Subscribe",
-    }
-    task_type_normalized = task_type_map.get(task_type.lower(), task_type)
+    task_type_normalized = normalize_task_type(task_type)
 
     previous_jobs = (
         JobsHistory.objects
-        .filter(seller__user_id=seller_id, task__taskType=task_type)
+        .filter(seller__user_id=seller_id, task__taskType__iexact=task_type_normalized)
         .exclude(task_id=task_id)
         .values("task_id", "seller__user_id", "task__taskType", "completionTime")
         .order_by("-startDate")[:50]
@@ -286,13 +542,15 @@ def _run_repetitive_behavior(task_id, seller_id, task_type, completion_time):
     tasks_list = [{
         "taskId":         str(j["task_id"]),
         "sellerId":       str(j["seller__user_id"]),
-        "taskType":       j["task__taskType"],
-        "completionTime": float(j["completionTime"] or 0),
+        "taskType":       normalize_task_type(j["task__taskType"]),
+        # JobsHistory.completionTime is stored in HOURS by service.submit_task.
+        # Fraud timing thresholds use SECONDS, so convert DB history to seconds.
+        "completionTime": float(j["completionTime"] or 0) * 3600,
     } for j in previous_jobs]
 
     global_jobs = (
         JobsHistory.objects
-        .filter(task__taskType=task_type)
+        .filter(task__taskType__iexact=task_type_normalized)
         .exclude(seller__user_id=seller_id)
         .values("task_id", "seller__user_id", "task__taskType", "completionTime")
         .order_by("-startDate")[:200]
@@ -300,32 +558,33 @@ def _run_repetitive_behavior(task_id, seller_id, task_type, completion_time):
     allSellers = [{
         "taskId":         str(j["task_id"]),
         "sellerId":       str(j["seller__user_id"]),
-        "taskType":       j["task__taskType"],
-        "completionTime": float(j["completionTime"] or 0),
+        "taskType":       normalize_task_type(j["task__taskType"]),
+        # JobsHistory.completionTime is stored in HOURS by service.submit_task.
+        # Fraud timing thresholds use SECONDS, so convert DB history to seconds.
+        "completionTime": float(j["completionTime"] or 0) * 3600,
     } for j in global_jobs]
 
-    # ── Layer A — Timing Consistency ──────────────────────────────
-    completion_times = [
+    previous_completion_times = [
         t["completionTime"]
         for t in tasks_list
-        if t["sellerId"] == str(seller_id) and t["taskType"] == task_type
+        if t["sellerId"] == str(seller_id) and t["taskType"] == task_type_normalized
     ]
-    completion_times.append(completion_time)
+    completion_times = previous_completion_times + [float(completion_time)]
+    history_count = len(previous_completion_times)
 
-    # Need at least 3 data points to judge consistency fairly
-    if len(completion_times) < 3:
-        std_dev                  = 0.0          # ← safe default, not None
+    # Fix: current task alone must never create a repetitive flag.
+    if history_count < 2:
+        std_dev                  = 0.0
         timing_consistency_label = "Insufficient History"
         timing_consistency_score = 0
     else:
         std_dev = statistics.stdev(completion_times)
         if std_dev < 2:   timing_consistency_label="Highly Repetitive"; timing_consistency_score=35
         elif std_dev < 5: timing_consistency_label="Moderate";          timing_consistency_score=15
-        else:             timing_consistency_label="Natural";            timing_consistency_score=0
+        else:             timing_consistency_label="Natural";           timing_consistency_score=0
 
-    # ── Layer B — Population Deviation ───────────────────────────
     seller_avg       = sum(completion_times) / len(completion_times)
-    population_times = [s["completionTime"] for s in allSellers if s["taskType"] == task_type]
+    population_times = [s["completionTime"] for s in allSellers if s["taskType"] == task_type_normalized and s["completionTime"] > 0]
 
     if len(population_times) > 1:
         population_mean = statistics.mean(population_times)
@@ -338,9 +597,8 @@ def _run_repetitive_behavior(task_id, seller_id, task_type, completion_time):
 
     if z_score < -2:   population_label="Highly Abnormal"; population_score=35
     elif z_score < -1: population_label="Unusual";         population_score=15
-    else:              population_label="Normal";           population_score=0
+    else:              population_label="Normal";          population_score=0
 
-    # ── Layer C — Task Type Validity (uses normalized type) ───────
     validity_label="Unknown"; validity_score=0; logical_behavior_flag=False
 
     if task_type_normalized == "Like":
@@ -362,14 +620,24 @@ def _run_repetitive_behavior(task_id, seller_id, task_type, completion_time):
 
     final_behavior_risk_score = timing_consistency_score + population_score + validity_score
 
-    if final_behavior_risk_score >= 70:   repetitive_behavior_flag=True;  overall_behavior_label="Highly Suspicious"
-    elif final_behavior_risk_score >= 30: repetitive_behavior_flag=True;  overall_behavior_label="Moderately Suspicious"
-    else:                                 repetitive_behavior_flag=False; overall_behavior_label="Normal"
+    # Fix: only consistency creates a repetitive behavior flag.
+    repetitive_behavior_flag = bool(history_count >= 2 and timing_consistency_score >= 15)
+
+    if repetitive_behavior_flag and final_behavior_risk_score >= 70:
+        overall_behavior_label = "Highly Suspicious Repetition"
+    elif repetitive_behavior_flag:
+        overall_behavior_label = "Repetitive Timing Pattern"
+    elif history_count < 2 and (population_score > 0 or validity_score > 0):
+        overall_behavior_label = "Suspicious Speed, Not Repetitive"
+    else:
+        overall_behavior_label = "Normal"
 
     return {
         "layer_a": {
             "completion_times":         completion_times,
-            "std_dev":                  round(std_dev, 2),   # ← always float now
+            "previous_completion_times": previous_completion_times,
+            "history_count":            history_count,
+            "std_dev":                  round(std_dev, 2),
             "timing_consistency_label": timing_consistency_label,
             "timing_consistency_score": timing_consistency_score,
         },
@@ -390,6 +658,7 @@ def _run_repetitive_behavior(task_id, seller_id, task_type, completion_time):
             "final_behavior_risk_score": final_behavior_risk_score,
             "overall_behavior_label":    overall_behavior_label,
             "repetitive_behavior_flag":  repetitive_behavior_flag,
+            "note": "Repetition requires at least 2 previous same-type tasks. New sellers are not penalized for repetition.",
         },
         "_flat": {
             "std_dev":                  round(std_dev, 2),
@@ -408,50 +677,92 @@ def _run_repetitive_behavior(task_id, seller_id, task_type, completion_time):
 # ======================================================
 def _run_ip_device_analysis(task_id, seller_id, ip_address, device_id, user_agent):
 
+    seller_id = str(seller_id)
+    ip_address = (ip_address or "").strip()
+    device_id = (device_id or "").strip()
+    user_agent = (user_agent or "").strip()
+
     all_logs = SellerBehaviorLog.objects.all().values(
         "task_id", "seller_id", "ip_address", "device_id", "user_agent"
     )
     all_sellers = [{
         "taskId":    str(log["task_id"]),
         "sellerId":  str(log["seller_id"]),
-        "ipAddress": log["ip_address"] or "",
-        "deviceId":  log["device_id"]  or "",
-        "userAgent": log["user_agent"] or "",
+        "ipAddress": (log["ip_address"] or "").strip(),
+        "deviceId":  (log["device_id"]  or "").strip(),
+        "userAgent": (log["user_agent"] or "").strip(),
     } for log in all_logs]
 
     # Layer A — Device Sharing
-    device_sellers = {str(seller_id)}
-    for s in all_sellers:
-        if s["deviceId"] == device_id and device_id:
-            device_sellers.add(s["sellerId"])
-    device_seller_count = len(device_sellers)
+    # Important: blank device_id should NOT be counted as one shared device.
+    if device_id:
+        device_sellers = {seller_id}
+        for s in all_sellers:
+            if s["deviceId"] == device_id:
+                device_sellers.add(s["sellerId"])
+        device_seller_count = len(device_sellers)
+    else:
+        device_sellers = {seller_id}
+        device_seller_count = 1
 
-    if device_seller_count == 1:   device_sharing_label="Safe";              device_sharing_score=0
-    elif device_seller_count == 2: device_sharing_label="Suspicious";        device_sharing_score=30
-    else:                          device_sharing_label="Highly Suspicious"; device_sharing_score=70
+    if not device_id:
+        device_sharing_label = "Device ID Missing"
+        device_sharing_score = 10
+    elif device_seller_count == 1:
+        device_sharing_label = "Safe"
+        device_sharing_score = 0
+    elif device_seller_count == 2:
+        device_sharing_label = "Suspicious"
+        device_sharing_score = 30
+    else:
+        device_sharing_label = "Highly Suspicious"
+        device_sharing_score = 70
 
     # Layer B — IP Reuse
-    ip_sellers = {str(seller_id)}
-    for s in all_sellers:
-        if s["ipAddress"] == ip_address and ip_address:
-            ip_sellers.add(s["sellerId"])
-    ip_seller_count = len(ip_sellers)
+    # Same public IP can be normal in hostel/office/WiFi, so score is softer than device sharing.
+    if ip_address:
+        ip_sellers = {seller_id}
+        for s in all_sellers:
+            if s["ipAddress"] == ip_address:
+                ip_sellers.add(s["sellerId"])
+        ip_seller_count = len(ip_sellers)
+    else:
+        ip_sellers = {seller_id}
+        ip_seller_count = 1
 
-    if ip_seller_count <= 2:   ip_reuse_label="Normal";             ip_reuse_score=0
-    elif ip_seller_count <= 5: ip_reuse_label="Suspicious";         ip_reuse_score=15
-    else:                      ip_reuse_label="Highly Suspicious";  ip_reuse_score=35
+    if not ip_address:
+        ip_reuse_label = "IP Missing"
+        ip_reuse_score = 5
+    elif ip_seller_count <= 2:
+        ip_reuse_label = "Normal"
+        ip_reuse_score = 0
+    elif ip_seller_count <= 5:
+        ip_reuse_label = "Suspicious"
+        ip_reuse_score = 15
+    else:
+        ip_reuse_label = "Highly Suspicious"
+        ip_reuse_score = 35
 
-    # Layer C — Bot Detection
-    bot_keywords      = ["headless","selenium","phantomjs","puppeteer","python-requests","scrapy","bot"]
+    # Layer C — Bot / automation clue from User-Agent
+    bot_keywords      = ["headless", "selenium", "phantomjs", "puppeteer", "python-requests", "scrapy", "bot", "playwright"]
     detected_keywords = [kw for kw in bot_keywords if kw.lower() in user_agent.lower()]
     automation_score  = 70 if detected_keywords else 0
     automation_label  = "Automation Detected" if detected_keywords else "Normal"
 
     device_risk_score = min(device_sharing_score + ip_reuse_score + automation_score, 100)
 
-    if device_risk_score >= 70:   overall_device_label="Highly Suspicious";     device_fraud_flag=True
-    elif device_risk_score >= 30: overall_device_label="Moderately Suspicious"; device_fraud_flag=True
-    else:                         overall_device_label="Normal";                device_fraud_flag=False
+    if device_risk_score >= 70:
+        overall_device_label = "Highly Suspicious"
+        device_fraud_flag = True
+    elif device_risk_score >= 30:
+        overall_device_label = "Moderately Suspicious"
+        device_fraud_flag = True
+    elif device_risk_score >= 10:
+        overall_device_label = "Needs Context"
+        device_fraud_flag = False
+    else:
+        overall_device_label = "Normal"
+        device_fraud_flag = False
 
     return {
         "device_analysis": {
@@ -484,9 +795,86 @@ def _run_ip_device_analysis(task_id, seller_id, ip_address, device_id, user_agen
             "device_sharing_score": device_sharing_score,
             "ip_seller_count":      ip_seller_count,
             "ip_reuse_score":       ip_reuse_score,
+            "automation_score":     automation_score,
         }
     }
 
+
+# ======================================================
+# INTERNAL — SCREENSHOT ANALYSIS
+# ======================================================
+def _run_screenshot_analysis(current_job):
+    result = {
+        "is_duplicate_screenshot": 0,
+        "message": "No screenshot submitted",
+        "duplicate_type": "none",
+        "duplicate_job_id": None,
+        "image_quality_score": 0,
+        "image_quality_label": "No image provided",
+        "image_signals": [],
+    }
+
+    if not current_job:
+        return result
+
+    if current_job.proofSha256:
+        duplicate = (
+            JobsHistory.objects
+            .filter(proofSha256=current_job.proofSha256)
+            .exclude(proofSha256="")
+            .exclude(id=current_job.id)
+            .first()
+        )
+        if duplicate:
+            result.update({
+                "is_duplicate_screenshot": 1,
+                "message": "Exact duplicate screenshot detected",
+                "duplicate_type": "exact_sha256",
+                "duplicate_job_id": duplicate.id,
+            })
+
+    if not result["is_duplicate_screenshot"] and getattr(current_job, "proofPhash", ""):
+        old_proofs = (
+            JobsHistory.objects
+            .exclude(id=current_job.id)
+            .exclude(proofPhash="")
+            .exclude(proofPhash__isnull=True)
+            .only("id", "proofPhash")
+        )
+        for old_job in old_proofs:
+            try:
+                distance = hamming_distance(current_job.proofPhash, old_job.proofPhash)
+            except Exception:
+                continue
+            if distance < HAMMING_THRESHOLD:
+                result.update({
+                    "is_duplicate_screenshot": 1,
+                    "message": "Similar or edited duplicate screenshot detected",
+                    "duplicate_type": "perceptual_hash",
+                    "duplicate_job_id": old_job.id,
+                    "phash_distance": distance,
+                    "phash_threshold": HAMMING_THRESHOLD,
+                })
+                break
+
+    if getattr(current_job, "proofImage", None):
+        try:
+            quality = analyze_proof_image_quality(image_path=current_job.proofImage.path)
+        except Exception:
+            quality = analyze_proof_image_quality(None)
+        result.update({
+            "image_quality_score": quality.get("image_quality_score", 0),
+            "image_quality_label": quality.get("image_quality_label", "No image provided"),
+            "image_signals": quality.get("image_signals", []),
+            "image_width": quality.get("image_width", 0),
+            "image_height": quality.get("image_height", 0),
+            "image_format": quality.get("image_format", ""),
+            "image_file_size_kb": quality.get("image_file_size_kb", 0),
+        })
+        if not result["is_duplicate_screenshot"]:
+            result["message"] = result["image_quality_label"]
+
+    return result
 
 # ======================================================
 # INTERNAL — ML PREDICTION (Layer 3)
@@ -524,7 +912,9 @@ def _run_ml_prediction(layer3_input):
         "fraud_probability":  fraud_probability,
         "risk_level":         risk_level,
         "label":              prediction,
-        "fraud_reasons":      suspicious_signals if prediction == 1 else [],
+        # Keep reasons visible for admin even when probability is below 50%.
+        # Fraud reasons are NOT only for 100% fraud; they explain the strongest signals found.
+        "fraud_reasons":      suspicious_signals,
         "suspicious_signals": suspicious_signals,
     }
 
@@ -892,14 +1282,7 @@ def analyze_seller_submission(request):
     except SellerProfile.DoesNotExist:
         return JsonResponse({"error": "Seller profile not found"}, status=404)
 
-    task_type = task.taskType
-    _task_type_map = {
-    "like":"Like","likes":"Like",
-    "follow":"Follow","follows":"Follow",
-    "comment":"Comment","comments":"Comment",
-    "subscribe":"Subscribe","subscribes":"Subscribe",
-    }
-    task_type = _task_type_map.get(task_type.lower(), task_type)
+    task_type = normalize_task_type(task.taskType)
     # 3. Seller info
     seller_type_label, seller_type_encoded, seller_age_days = get_seller_type(seller_profile)
 
@@ -921,24 +1304,12 @@ def analyze_seller_submission(request):
     .first()
 )
 
-    is_duplicate_screenshot = 0
-
-    if current_job and current_job.proofSha256:  # ← proofSha256 is CharField
-                                              # empty string "" = falsy = skips check
-                                              # has value = truthy = runs check ✓
-        duplicate_exists = (
-        JobsHistory.objects
-        .filter(proofSha256=current_job.proofSha256)
-        .exclude(proofSha256="")        # ← exclude empty strings ✓
-        .exclude(id=current_job.id)     # ← exclude current job ✓
-        .exists()
+    ip_address, device_id, user_agent = _hydrate_network_context(
+        request, current_job, ip_address, device_id, user_agent
     )
-        is_duplicate_screenshot = 1 if duplicate_exists else 0
 
-    layer1_result = {
-        "is_duplicate_screenshot": is_duplicate_screenshot,
-        "message": "Duplicate detected" if is_duplicate_screenshot else "No duplicate found",
-    }
+    layer1_result = _run_screenshot_analysis(current_job)
+    is_duplicate_screenshot = int(layer1_result.get("is_duplicate_screenshot", 0))
 
     # 5. Layer 2 Module 1 — Timing
     timing_result = _run_timing_analysis(task_id, task_type, completion_time)
@@ -946,16 +1317,17 @@ def analyze_seller_submission(request):
     # 6. Layer 2 Module 2 — Repetitive Behavior
     behavior_result = _run_repetitive_behavior(task_id, seller_id, task_type, completion_time)
 
-    # 7. Save BehaviorLog then run Module 3
-    # ── fix: always create new log, never skip ──
-    SellerBehaviorLog.objects.create(
-        task_id    = str(task_id),
-        seller_id  = str(seller_id),
-        job        = current_job,
-        ip_address = ip_address or None,
-        device_id  = device_id,
-        user_agent = user_agent,
-    )
+    # 7. Save / reuse BehaviorLog then run Module 3
+    # submit_task() already creates this log. Here we only create one if missing.
+    if current_job and not current_job.behavior_logs.exists():
+        SellerBehaviorLog.objects.create(
+            task_id    = str(task_id),
+            seller_id  = str(seller_id),
+            job        = current_job,
+            ip_address = ip_address or None,
+            device_id  = device_id,
+            user_agent = user_agent,
+        )
     device_result = _run_ip_device_analysis(task_id, seller_id, ip_address, device_id, user_agent)
 
     # 8. Build Layer 3 payload
@@ -989,16 +1361,81 @@ def analyze_seller_submission(request):
         "device_sharing_score":     flat_device["device_sharing_score"],
         "ip_seller_count":          flat_device["ip_seller_count"],
         "ip_reuse_score":           flat_device["ip_reuse_score"],
-        # ── fix: removed device_fraud_flag and automation_score
-        #    they were not in training features ──
+        "automation_score":         flat_device.get("automation_score", 0),
     }
 
     # 9. Layer 3 — ML Prediction
     # 9. Layer 3 — ML Prediction
     layer3_result = _run_ml_prediction(layer3_input)
 
+    manual_signals = []
+    if is_duplicate_screenshot:
+        manual_signals.append(_signal(
+            "is_duplicate_screenshot",
+            "Layer 1 — Screenshot Check",
+            layer1_result.get("message", "Duplicate screenshot detected"),
+            layer1_result.get("duplicate_type", "duplicate"),
+            100,
+        ))
+    manual_signals.extend(layer1_result.get("image_signals", []))
+
+    if flat_device["device_seller_count"] >= 2 or flat_device["device_sharing_score"] >= 20:
+        manual_signals.append(_signal(
+            "device_seller_count",
+            "Layer 2 — Device Analysis",
+            f"Same device is linked with {flat_device['device_seller_count']} seller account(s)",
+            flat_device["device_seller_count"],
+            flat_device["device_sharing_score"],
+        ))
+
+    if flat_device["ip_seller_count"] >= 3 or flat_device["ip_reuse_score"] >= 15:
+        manual_signals.append(_signal(
+            "ip_seller_count",
+            "Layer 2 — IP Analysis",
+            f"Same IP is linked with {flat_device['ip_seller_count']} seller account(s)",
+            flat_device["ip_seller_count"],
+            flat_device["ip_reuse_score"],
+        ))
+
+    auto_score = device_result.get("automation_analysis", {}).get("automation_score", 0)
+    if auto_score >= 70:
+        manual_signals.append(_signal(
+            "automation_score",
+            "Layer 2 — Bot/User-Agent Analysis",
+            "Browser/user-agent looks automated",
+            device_result.get("automation_analysis", {}).get("detected_keywords", []),
+            auto_score,
+        ))
+
+    # 9.1 Combine rule signals + ML signals cleanly.
+    # suspicious_signals = all useful signals, but without duplicate meanings.
+    # fraud_reasons = only strong/actionable reasons for admin decision.
+    combined_signals = manual_signals + layer3_result.get("suspicious_signals", [])
+    layer3_result["suspicious_signals"] = _dedupe_signals(combined_signals, max_items=8)
+
+    layer3_result = _apply_rule_based_probability_floor(
+        layer3_result=layer3_result,
+        layer1_result=layer1_result,
+        flat_device=flat_device,
+        device_result=device_result,
+    )
+    layer3_result["fraud_reasons"] = _strong_fraud_reasons(
+        layer3_result.get("suspicious_signals", []),
+        probability=layer3_result.get("fraud_probability", 0),
+        max_items=5,
+    )
+
+    human_explanation = _make_human_explanation(
+        layer1_result, timing_result, behavior_result, device_result, layer3_result
+    )
+
     # 10. Save to FraudAnalysisResult ─────────────────────────────
     try:
+
+        # Re-analysis of same proof should update the latest result instead of failing
+        # because FraudAnalysisResult.job is OneToOne.
+        if current_job:
+            FraudAnalysisResult.objects.filter(job=current_job).delete()
 
         fraud_result = FraudAnalysisResult.objects.create(
             # Core references
@@ -1047,7 +1484,7 @@ def analyze_seller_submission(request):
             seller_age_days    = seller_age_days,
             seller_trust_score = seller_trust_score,
         )
-        JobsHistory.objects.filter(task_id=fraud_result.job_id).update(fraud_id=fraud_result.id)
+        JobsHistory.objects.filter(id=fraud_result.job_id).update(fraud_id=fraud_result.id)
 
         print(f"[EngageX] FraudAnalysisResult saved for seller {seller_id} task {task_id}")
     except Exception as e:
@@ -1062,6 +1499,17 @@ def analyze_seller_submission(request):
             "sellerAgeDays":       seller_age_days,
             "trustScore":          seller_trust_score,
             "totalCompletedTasks": total_completed_tasks,
+        },
+        "fraud_layers_summary": {
+            "total_main_layers": 3,
+            "layer1": "Screenshot/proof duplicate + image quality",
+            "layer2_modules": ["Timing", "Repetitive behavior", "Device/IP", "Bot/User-Agent"],
+            "layer3": "ML probability + explainable reasons",
+        },
+        "networkContextUsed": {
+            "ipAddress": ip_address,
+            "deviceId": device_id,
+            "userAgent": user_agent,
         },
         "layer1_screenshot": layer1_result,
         "layer2": {
@@ -1080,4 +1528,5 @@ def analyze_seller_submission(request):
             },
         },
         "layer3_prediction": layer3_result,
+        "human_explanation": human_explanation,
     }, status=200)
