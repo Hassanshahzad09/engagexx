@@ -42,7 +42,7 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
     if (!user?.userId) return;
 
     try {
-      const response = await fetch(`http://127.0.0.1:8000/api/buyer-dashboard-stats/${user.userId}/`);
+      const response = await fetch(`https://caddie-unlearned-author.ngrok-free.dev/api/buyer-dashboard-stats/${user.userId}/`);
       const data = await response.json();
 
       if (response.ok) {
@@ -108,7 +108,7 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
     }
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/create-task/', {
+      const response = await fetch('https://caddie-unlearned-author.ngrok-free.dev/api/create-task/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -158,7 +158,7 @@ export default function BuyerDashboard({ userData, onNavigate, onLogout }) {
     setIsFunding(true);
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/add-funds/', {
+      const response = await fetch('https://caddie-unlearned-author.ngrok-free.dev/api/add-funds/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

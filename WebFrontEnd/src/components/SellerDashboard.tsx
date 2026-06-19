@@ -15,7 +15,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import ConnectSocial from './ConnectSocial';
 
 
-const SUBMIT_TASK_API_URL = 'http://127.0.0.1:8000/api/submit-task/';
+const SUBMIT_TASK_API_URL = 'https://caddie-unlearned-author.ngrok-free.dev/api/submit-task/';
 const MAX_PROOF_IMAGE_SIZE_MB = 5;
 const MAX_PROOF_IMAGE_SIZE_BYTES = MAX_PROOF_IMAGE_SIZE_MB * 1024 * 1024;
 
@@ -275,8 +275,8 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
 
     try {
       const [tasksResponse, statsResponse] = await Promise.all([
-        fetch(`http://127.0.0.1:8000/api/approved-tasks/?userId=${userId}`),
-        fetch(`http://127.0.0.1:8000/api/seller-dashboard-stats/${userId}/`),
+        fetch(`https://caddie-unlearned-author.ngrok-free.dev/api/approved-tasks/?userId=${userId}`),
+        fetch(`https://caddie-unlearned-author.ngrok-free.dev/api/seller-dashboard-stats/${userId}/`),
       ]);
 
       const tasksData = await tasksResponse.json();
@@ -453,7 +453,7 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
       const data = await response.json();
       console.log("Task submission time ",timer)
       if (response.ok) {
-        const fraud_response = await fetch('http://127.0.0.1:8000/fraud/analyze-submission/', {
+        const fraud_response = await fetch('https://caddie-unlearned-author.ngrok-free.dev/fraud/analyze-submission/', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -509,7 +509,7 @@ export default function SellerDashboard({ userData, onLogout, theme = 'light' })
     setIsWithdrawing(true);
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/withdraw-funds/', {
+      const response = await fetch('https://caddie-unlearned-author.ngrok-free.dev/api/withdraw-funds/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

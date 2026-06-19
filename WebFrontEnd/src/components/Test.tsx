@@ -18,19 +18,19 @@ function App() {
 
   const getApiUrl = () => {
     if (platform === "twitter") {
-      return "http://127.0.0.1:8000/proof_checker/check-twitter-comments/";
+      return "https://caddie-unlearned-author.ngrok-free.dev/proof_checker/check-twitter-comments/";
     }
 
     if (platform === "instagram") {
-      return "http://127.0.0.1:8000/proof_checker/check-instagram-comments/";
+      return "https://caddie-unlearned-author.ngrok-free.dev/proof_checker/check-instagram-comments/";
     }
 
     if (platform === "facebook") {
-      return "http://127.0.0.1:8000/proof_checker/check-facebook-comments/";
+      return "https://caddie-unlearned-author.ngrok-free.dev/proof_checker/check-facebook-comments/";
     }
 
     if (platform === "youtube") {
-      return "http://127.0.0.1:8000/proof_checker/check-youtube-comments/";
+      return "https://caddie-unlearned-author.ngrok-free.dev/proof_checker/check-youtube-comments/";
     }
 
     return "";

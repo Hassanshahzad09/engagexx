@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import AssignedSellersModal from './AssignedSellersModal';
 
-const API_BASE_URL = 'http://127.0.0.1:8000';
+const API_BASE_URL = 'https://caddie-unlearned-author.ngrok-free.dev';
 const FRAUD_STATS_API_URL = `${API_BASE_URL}/api/fraud-stats/`;
 
 const emptyDashboardData = {
